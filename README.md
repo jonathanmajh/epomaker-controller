@@ -194,6 +194,52 @@ Activate the venv first — the installer pins `ExecStart` to the
 `epomakercontroller` on `PATH`. The unit uses `Restart=on-failure` and needs
 the uaccess udev rule from `setup_udev.sh`, so run that first.
 
+Useful options:
+
+```bash
+epomakercontroller start-daemon -v              # debug logging (per-send lines)
+epomakercontroller start-daemon --interval 5    # slower refresh (min 1.6s)
+```
+
+Show a temperature without editing the unit — the daemon's `TEMP_KEY`
+argument also reads `EPOMAKER_TEMP_KEY`:
+
+```bash
+systemctl --user edit epomaker-daemon
+# [Service]
+# Environment=EPOMAKER_TEMP_KEY=coretemp-0
+systemctl --user restart epomaker-daemon
+```
+
+#### Headless machines
+
+The unit is a *user* unit and `uaccess` only grants access to a local seat
+session, so a true headless box needs two extra steps:
+
+```bash
+# 1. Keep the user manager running without a login session
+sudo loginctl enable-linger "$USER"
+
+# 2. Grant access by group instead of by seat: replace TAG+="uaccess" with
+#    a group your user is in, e.g. in /etc/udev/rules.d/70-epomaker-dynatab.rules
+#    SUBSYSTEM=="usb", ATTRS{idVendor}=="3151", ATTRS{idProduct}=="4015",
+#        MODE="0660", GROUP="plugdev"
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+Then reboot (or replug) and check `systemctl --user status epomaker-daemon`.
+
+#### What happens when the keyboard goes away
+
+The daemon reconnects with exponential backoff (1s → 30s, 5 attempts) when a
+send fails, so a brief unplug or a suspend/resume cycle is ridden out. If it
+cannot reopen the device it exits non-zero and systemd restarts it
+(`Restart=on-failure`). When the keyboard is absent at login each failure cycle
+takes roughly 20s, so the restart limit (`StartLimitBurst=5` in 5 minutes) is
+reached and the unit stops retrying — replugging starts it again through the
+udev rule. If the keyboard disappears mid-session, the daemon's own backoff
+rides it out without systemd restarting anything.
+
 ### Library-style usage (optional)
 ```python
 from epomakercontroller.configs.configs import load_main_config

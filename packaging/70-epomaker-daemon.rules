@@ -1,10 +1,15 @@
 # Start the per-user Epomaker daemon when the keyboard appears.
 #
-# This is a companion to 70-epomaker-dynatab.rules: that rule grants the
-# active seat an ACL on the HID nodes, this one asks systemd --user to start
-# epomaker-daemon.service whenever a matching keyboard is plugged in.
+# Companion to 70-epomaker-dynatab.rules: that rule grants the active seat an
+# ACL on the HID nodes (TAG+="uaccess"), this one asks the user's systemd
+# instance to start epomaker-daemon.service when a matching keyboard is added.
 #
-# SUBSYSTEM=="usb" (not usb-device) matches the device itself, and
-# SYSTEMD_USER_WANTS is only honoured once systemd-udevd has tagged the
-# device with "systemd" (TAG+="systemd").
+# Notes:
+#   * TAG+="systemd" is what makes udev hand the event to systemd at all;
+#     without it SYSTEMD_USER_WANTS is ignored.
+#   * Match SUBSYSTEM=="usb" for the device itself. A usb-device match would
+#     fire for every interface, so the service would be started several times
+#     per plug-in.
+#   * SYSTEMD_USER_WANTS is queued for the user that owns the device, which
+#     requires a login session on a seat (see the README's headless section).
 SUBSYSTEM=="usb", ATTRS{idVendor}=="3151", ATTR{idProduct}=="4015", TAG+="systemd", ENV{SYSTEMD_USER_WANTS}+="epomaker-daemon.service"

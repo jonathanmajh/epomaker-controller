@@ -5,21 +5,27 @@ Documentation=https://github.com/jonathanmajh/epomaker-controller
 # active seat an ACL (TAG+="uaccess") before starting.
 After=graphical-session.target
 PartOf=graphical-session.target
-# Give up after 5 restarts in a minute: enough to ride out a replug, not
-# enough to spin forever on a config error.
-StartLimitIntervalSec=60
+# When the keyboard is absent at login, a failure cycle takes roughly 20s
+# (5 backoff attempts + RestartSec), i.e. ~3 restarts/minute. Allow 5 in 5
+# minutes so that trips and the unit stops instead of retrying forever;
+# replugging starts it again via 70-epomaker-daemon.rules. A keyboard lost
+# mid-session is ridden out by the daemon's own backoff.
+StartLimitIntervalSec=300
 StartLimitBurst=5
 
 [Service]
 Type=simple
 # install-daemon.sh rewrites this to the absolute path of the
-# epomakercontroller that is currently on PATH (i.e. the one in your venv).
+# epomakercontroller that is on PATH (i.e. the one in your venv).
 ExecStart=/usr/bin/env epomakercontroller start-daemon
+# Restart after a crash or a fatal device error. The daemon already retries
+# with backoff internally; this covers the case where it gives up entirely.
 Restart=on-failure
 RestartSec=5s
-# The daemon reconnects with backoff on its own, so a simple restart is enough.
-TimeoutStopSec=10
-# Send logs to the journal at INFO; the per-update lines are DEBUG.
+# Set EPOMAKER_TEMP_KEY to show a temperature as well, e.g.:
+#   systemctl --user edit epomaker-daemon
+#   [Service]
+#   Environment=EPOMAKER_TEMP_KEY=coretemp-0
 Environment=PYTHONUNBUFFERED=1
 
 [Install]

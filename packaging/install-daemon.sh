@@ -45,8 +45,11 @@ fi
 
 echo "Installing ${UNIT_NAME} to ${UNIT_DIR}..."
 mkdir -p "${UNIT_DIR}"
+
+# Escape the sed replacement: & and \ are special, and | is our delimiter.
 EPW_BIN="$(command -v epomakercontroller)"
-sed "s|^ExecStart=.*|ExecStart=${EPW_BIN} start-daemon|" \
+EPW_ESCAPED="$(printf '%s' "${EPW_BIN}" | sed -e 's/[\\&|]/\\&/g')"
+sed "s|^ExecStart=.*|ExecStart=${EPW_ESCAPED} start-daemon|" \
     "${SCRIPT_DIR}/${UNIT_NAME}" > "${UNIT_DIR}/${UNIT_NAME}"
 chmod 644 "${UNIT_DIR}/${UNIT_NAME}"
 
@@ -64,5 +67,9 @@ echo "  status: systemctl --user status ${UNIT_NAME}"
 echo "  logs:   journalctl --user -u ${UNIT_NAME} -f"
 echo
 echo "Unplug and replug the keyboard to confirm the udev rule starts it."
-echo "The daemon exits non-zero if it cannot reach the keyboard, and systemd"
-echo "restarts it (Restart=on-failure, up to 5 times per minute)."
+echo
+echo "If the keyboard is absent at login the daemon gives up after"
+echo "StartLimitBurst restarts; replugging starts it again via udev. A"
+echo "keyboard lost mid-session is ridden out by the daemon's backoff."
+echo "To show a temperature too, run: systemctl --user edit ${UNIT_NAME}"
+echo "and set Environment=EPOMAKER_TEMP_KEY=coretemp-0."
