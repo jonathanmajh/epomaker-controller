@@ -3,7 +3,6 @@ from tkinter import colorchooser, filedialog, messagebox, ttk
 import os
 import queue
 import threading
-import time
 from pathlib import Path
 from PIL import Image, ImageTk
 from .fonts import F
@@ -19,7 +18,7 @@ from .screen_slots import (
     slot_photoimage,
 )
 
-from ..epomakercontroller import EpomakerController
+from ..backend import Backend, connect_backend
 from ..configs.configs import load_main_config
 from ..commands.data.constants import CAPABILITY_DYNATAB_SCREEN
 
@@ -318,15 +317,26 @@ class TextOnScreenDialog(tk.Toplevel):
 
 
 class ScreenDesignerApp:
-    def __init__(self, root: tk.Tk, switch_callback=None):
+    def __init__(
+        self,
+        root: tk.Tk,
+        switch_callback=None,
+        backend: Backend | None = None,
+        direct: bool = False,
+    ):
         self.root = root
         self.switch_callback = switch_callback
         T.style_root(root, "LED Screen Designer")
         self.root.resizable(False, False)
 
-        # Main config & controller
+        # Main config & controller.  The backend talks to the daemon when one
+        # is running, so the screen designer no longer fights it for the HID
+        # handle.
         self.config_main = load_main_config()
-        self.controller = EpomakerController(self.config_main)
+        self.backend = backend or connect_backend(
+            self.config_main, direct=direct
+        )
+        self.controller = self.backend
 
         # Editor State
         # base_frames stores the unadjusted high-fidelity RGB tuples.
@@ -1241,17 +1251,19 @@ class ScreenDesignerApp:
         self.upload_btn.config(state=tk.DISABLED)
         status_frame = tk.Frame(self.root, bg=T.DANGER)
         status_frame.pack(fill=tk.X, before=self._main_frame)
-        tk.Label(
+        status_label = tk.Label(
             status_frame,
             text="Uploading — keyboard will reboot. Do not unplug.",
             font=F(10, "bold"),
             bg=T.DANGER,
             fg="#ffffff",
             pady=8,
-        ).pack(side=tk.LEFT, padx=12)
+        )
+        status_label.pack(side=tk.LEFT, padx=12)
         progress = ttk.Progressbar(status_frame, mode="indeterminate", length=220)
         progress.pack(side=tk.LEFT, pady=6)
         progress.start(12)
+        progress_queue: queue.Queue[dict] = queue.Queue()
 
         def _finish(error):
             try:
@@ -1275,7 +1287,9 @@ class ScreenDesignerApp:
                 # Close the main handle so iface 2/0 opens do not conflict.
                 self.controller.close_device()
                 self.controller.send_dynatab_frames(
-                    frames_snapshot, delay_ms=delay_ms
+                    frames_snapshot,
+                    delay_ms=delay_ms,
+                    progress=progress_queue.put,
                 )
             except Exception as e:
                 error = str(e)
@@ -1288,7 +1302,37 @@ class ScreenDesignerApp:
             # (Never call into Tk from this worker thread — it is not thread-safe.)
             self._upload_queue.put(error)
 
+        def _update_progress() -> None:
+            latest = None
+            try:
+                while True:
+                    latest = progress_queue.get_nowait()
+            except queue.Empty:
+                pass
+            if latest is None:
+                return
+            stage = latest.get("stage")
+            if stage == "erasing":
+                text = "Erasing screen memory…"
+            elif stage == "uploading":
+                total = latest.get("total") or 0
+                sent = latest.get("sent") or 0
+                text = f"Sending packets {sent}/{total}…"
+            elif stage == "flashing":
+                text = "Writing flash and rebooting — do not unplug…"
+            elif stage == "applying":
+                text = "Applying new screen…"
+            elif stage == "done":
+                text = "Finishing…"
+            else:
+                return
+            try:
+                status_label.configure(text=text)
+            except tk.TclError:
+                pass
+
         def _poll():
+            _update_progress()
             try:
                 error = self._upload_queue.get_nowait()
             except queue.Empty:
@@ -1308,7 +1352,7 @@ def main():
     def on_close():
         if app.is_playing:
             app.is_playing = False
-        app.controller.close_device()
+        app.backend.close()
         root.destroy()
         
     root.protocol("WM_DELETE_WINDOW", on_close)

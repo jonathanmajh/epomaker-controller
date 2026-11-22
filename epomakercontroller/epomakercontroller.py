@@ -10,7 +10,7 @@ from datetime import datetime
 from json import dumps
 import os
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 import hid  # type: ignore[import-not-found]
 import signal
 import subprocess
@@ -111,6 +111,10 @@ class EpomakerController:
         caps = config_main["CAPABILITIES"] or []
         self.capabilities: set[str] = set(caps)
         self.device = hid.device()
+        # True only after a successful open. ``self.device`` is a non-None
+        # hid.device object even before it is opened, so it cannot be used as
+        # the "connected" test on its own.
+        self._opened = False
         # RLock so the signal handler (same thread) can close the device even if
         # a send is interrupted mid-flight; cross-thread exclusion is preserved.
         self.lock = threading.RLock()
@@ -132,6 +136,11 @@ class EpomakerController:
     def has_capability(self, name: str) -> bool:
         """Return True if this model advertises the given capability flag."""
         return name in self.capabilities
+
+    @property
+    def is_open(self) -> bool:
+        """Return True once the HID device has been opened successfully."""
+        return self._opened and self.device is not None
 
     def _setup_signal_handling(self) -> None:
         """Sets up signal handling to close the HID device on termination."""
@@ -179,6 +188,7 @@ class EpomakerController:
         """
         if self.dry_run:
             print("Dry run: skipping device open")
+            self._opened = True
             return True
 
         product_id = self._find_product_id()
@@ -224,6 +234,7 @@ class EpomakerController:
                 self.device.open_path(device_path)
             except IOError as e:
                 self.device = None
+                self._opened = False
                 raise DeviceNotOpenError(
                     f"Failed to open device: {e}\n"
                     "Please make sure the device is connected\n"
@@ -234,6 +245,7 @@ class EpomakerController:
 
             if self.device is None:
                 raise DeviceNotOpenError("Failed to open HID device")
+            self._opened = True
 
     def generate_udev_rule(self) -> None:
         """Generates a udev rule for the connected keyboard."""
@@ -444,10 +456,19 @@ class EpomakerController:
         return None
 
     def _upload_dynatab_command(
-        self, screen_command: EpomakerDynaTabScreenCommand
+        self,
+        screen_command: EpomakerDynaTabScreenCommand,
+        *,
+        progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         """Upload a prepared DynaTab screen command via interfaces 2 then 0."""
         if self.dry_run:
+            if progress:
+                progress({"stage": "erasing"})
+                progress({"stage": "uploading", "sent": 0, "total": 0})
+                progress({"stage": "flashing"})
+                progress({"stage": "applying"})
+                progress({"stage": "done"})
             print(
                 f"Dry run: skipping DynaTab screen upload "
                 f"({len(list(screen_command))} reports)"
@@ -466,6 +487,8 @@ class EpomakerController:
             dev2.open_path(dev2_path)
             reports_list = list(screen_command)
             if reports_list:
+                if progress:
+                    progress({"stage": "erasing"})
                 # Init report (0xa9) then wait for flash memory erase/init
                 dev2.send_feature_report(
                     b"\x00" + reports_list[0].get_all_bytes()
@@ -473,9 +496,21 @@ class EpomakerController:
                 time.sleep(ERASE_DELAY_S)
 
                 # Data reports (0x29) with packet pacing
-                for packet in reports_list[1:]:
+                data_reports = reports_list[1:]
+                total = len(data_reports)
+                if progress:
+                    progress({"stage": "uploading", "sent": 0, "total": total})
+                for index, packet in enumerate(data_reports, start=1):
                     dev2.send_feature_report(b"\x00" + packet.get_all_bytes())
                     time.sleep(PACKET_DELAY_S)
+                    if progress and (index == total or index % 5 == 0):
+                        progress(
+                            {
+                                "stage": "uploading",
+                                "sent": index,
+                                "total": total,
+                            }
+                        )
             upload_ok = True
         except Exception as e:
             raise DeviceCommunicationError(
@@ -486,6 +521,10 @@ class EpomakerController:
                 dev2.close()
 
         if upload_ok:
+            if progress:
+                progress(
+                    {"stage": "flashing", "seconds": SCREEN_FLASH_WAIT_S}
+                )
             print(
                 "Animation uploaded on Interface 2. Waiting "
                 f"{SCREEN_FLASH_WAIT_S:g} seconds for the keyboard to write to "
@@ -502,11 +541,15 @@ class EpomakerController:
             )
         dev0 = None
         try:
+            if progress:
+                progress({"stage": "applying"})
             dev0 = hid.device()
             dev0.open_path(dev0_path)
             dev0.write(b"\x00\x00")
             time.sleep(0.3)
             dev0.write(b"\x00\x01")
+            if progress:
+                progress({"stage": "done"})
         except Exception as e:
             raise DeviceCommunicationError(
                 f"Failed to apply screen design on Interface 0: {e}"
@@ -519,41 +562,58 @@ class EpomakerController:
         self,
         frames_rgb: list[list[tuple[int, int, int]]],
         delay_ms: int = 100,
+        *,
+        progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         """Send pixel frames directly to the DynaTab 75X screen (no image file).
 
         Args:
             frames_rgb: Column-major RGB frames (60×9 = 540 pixels each).
             delay_ms: Animation frame delay in milliseconds.
+            progress: Optional callback receiving upload stage dictionaries.
         """
         screen_command = EpomakerDynaTabScreenCommand(frames_rgb, delay_ms)
-        self._upload_dynatab_command(screen_command)
+        self._upload_dynatab_command(screen_command, progress=progress)
 
-    def send_dynatab_screen(self, image_path: str, delay_ms: int = 100) -> None:
+    def send_dynatab_screen(
+        self,
+        image_path: str,
+        delay_ms: int = 100,
+        *,
+        progress: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
         """Sends an image or GIF to the DynaTab 75X screen.
 
         Args:
             image_path (str): The path to the image/GIF file.
             delay_ms (int): The animation frame delay in milliseconds (default: 100).
+            progress: Optional callback receiving upload stage dictionaries.
         """
         screen_command = EpomakerDynaTabScreenCommand.from_image(
             image_path, delay_ms
         )
-        self._upload_dynatab_command(screen_command)
+        self._upload_dynatab_command(screen_command, progress=progress)
 
-    def send_image(self, image_path: str, delay_ms: int = 100) -> None:
+    def send_image(
+        self,
+        image_path: str,
+        delay_ms: int = 100,
+        *,
+        progress: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
         """Sends an image or GIF to the HID device.
 
         Args:
             image_path (str): The path to the image file.
             delay_ms (int): The animation frame delay in milliseconds (default: 100).
+            progress: Optional callback receiving upload stage dictionaries.
         """
         if self.has_capability(CAPABILITY_DYNATAB_SCREEN):
-            was_open = self.device is not None
+            was_open = self.is_open
             if was_open:
                 self.close_device()
 
-            self.send_dynatab_screen(image_path, delay_ms)
+            self.send_dynatab_screen(image_path, delay_ms, progress=progress)
 
             if was_open:
                 self.open_device()
@@ -567,7 +627,11 @@ class EpomakerController:
 
         image_command = EpomakerImageCommand.EpomakerImageCommand()
         image_command.encode_image(image_path)
+        if progress:
+            progress({"stage": "uploading", "sent": 0, "total": 0})
         self._send_command(image_command)
+        if progress:
+            progress({"stage": "done"})
 
     def send_time(self, time: datetime | None = None) -> None:
         """Sends `time` to the HID device.
@@ -888,6 +952,7 @@ class EpomakerController:
     def close_device(self) -> None:
         """Closes the USB HID device."""
         with self.lock:
+            self._opened = False
             if self.device:
                 self.device.close()
                 self.device = None

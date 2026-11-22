@@ -16,9 +16,14 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
+# The client socket lives in $XDG_RUNTIME_DIR/epomaker-controller.
+RuntimeDirectory=epomaker-controller
+RuntimeDirectoryMode=0700
 # install-daemon.sh rewrites this to the absolute path of the
 # epomakercontroller that is on PATH (i.e. the one in your venv).
 ExecStart=/usr/bin/env epomakercontroller start-daemon
+# Reload the model/layout/keymap without dropping the keyboard connection.
+ExecReload=/bin/kill -HUP $MAINPID
 # Restart after a crash. Device errors don't count: the daemon retries those
 # forever on its own (--reconnect-attempts defaults to 0 = no limit).
 Restart=on-failure

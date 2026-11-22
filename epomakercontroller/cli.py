@@ -3,14 +3,16 @@
 
 from __future__ import annotations
 
-import logging
+import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
 import click
 import tkinter as tk
 
+from .backend import Backend, connect_backend
 from .commands.data.constants import Profile
+from .daemon import run_daemon
 from .configs.configs import load_main_config
 from .epomakercontroller import EpomakerController
 from .exceptions import DeviceNotOpenError, EpomakerError
@@ -48,8 +50,15 @@ def open_controller(
         yield controller
 
 
+def _direct_requested() -> bool:
+    if os.environ.get("EPOMAKER_DIRECT") == "1":
+        return True
+    ctx = click.get_current_context(silent=True)
+    return bool(ctx and isinstance(ctx.obj, dict) and ctx.obj.get("direct"))
+
+
 def _run_with_device(
-    action: Callable[[EpomakerController], None],
+    action: Callable[[Backend], None],
     *,
     success: str | None = None,
     error_prefix: str = "Command failed",
@@ -57,16 +66,23 @@ def _run_with_device(
     install_signal_handlers: bool = False,
     dry_run: bool = False,
 ) -> None:
-    """Run *action* against an opened device; print success or error."""
+    """Run *action* through the daemon (or directly with ``--direct``)."""
     try:
-        with open_controller(
-            dry_run=dry_run,
-            only_info=only_info,
-            install_signal_handlers=install_signal_handlers,
-        ) as controller:
-            action(controller)
-            if success:
-                click.echo(success)
+        if _direct_requested() or dry_run:
+            with open_controller(
+                dry_run=dry_run,
+                only_info=only_info,
+                install_signal_handlers=install_signal_handlers,
+            ) as controller:
+                action(controller)  # type: ignore[arg-type]
+        else:
+            backend = connect_backend(CONFIG_MAIN)
+            try:
+                action(backend)
+            finally:
+                backend.close()
+        if success:
+            click.echo(success)
     except (EpomakerError, OSError, ValueError) as e:
         click.echo(f"{error_prefix}: {e}")
     except Exception as e:  # unexpected — still report cleanly for CLI users
@@ -74,9 +90,17 @@ def _run_with_device(
 
 
 @click.group()
-def cli() -> None:
+@click.option(
+    "--direct",
+    is_flag=True,
+    envvar="EPOMAKER_DIRECT",
+    help="Talk to the keyboard directly instead of through the daemon.",
+)
+@click.pass_context
+def cli(ctx: click.Context, direct: bool) -> None:
     """A simple CLI for the EpomakerController."""
-    pass
+    ctx.ensure_object(dict)
+    ctx.obj["direct"] = direct
 
 
 @cli.command()
@@ -244,7 +268,7 @@ def start_daemon(
     reconnect_attempts: int,
     verbose: bool,
 ) -> None:
-    """Start a daemon to update the CPU usage and optionally a temperature.
+    """Run the daemon: CPU/temperature stats and the client socket.
 
     TEMP_KEY may also be supplied via the EPOMAKER_TEMP_KEY environment
     variable, which is how the systemd unit passes it.
@@ -255,26 +279,109 @@ def start_daemon(
     attempts so a service manager (systemd ``Restart=on-failure``) can
     restart it.
     """
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
     try:
-        with open_controller(
-            install_signal_handlers=True, connect=False
-        ) as controller:
-            controller.start_daemon(
-                temp_key,
-                test_mode,
-                poll_interval_s=poll_interval,
-                reconnect_attempts=reconnect_attempts,
-                wait_for_device=True,
-            )
+        code = run_daemon(
+            stats=True,
+            temp_key=temp_key,
+            poll_interval_s=poll_interval,
+            test_mode=test_mode,
+            reconnect_attempts=reconnect_attempts,
+            verbose=verbose,
+        )
     except KeyboardInterrupt:
         click.echo("Daemon interrupted by user.")
+        return
     except Exception as e:
         click.echo(f"Error in start-daemon: {e}", err=True)
         raise SystemExit(1) from e
+    raise SystemExit(code)
+
+
+@cli.command()
+@click.option(
+    "--test",
+    "test_mode",
+    is_flag=True,
+    help="Send random stats data instead of real values.",
+)
+@click.option(
+    "--interval",
+    "poll_interval",
+    default=1.6,
+    show_default=True,
+    type=click.FloatRange(min=1.6),
+    help="Minimum seconds between stats updates (hardware limit: 1.6).",
+)
+@click.option(
+    "--reconnect-attempts",
+    "reconnect_attempts",
+    default=0,
+    show_default=True,
+    type=click.IntRange(min=0),
+    help=(
+        "Open attempts before giving up when the keyboard is missing. "
+        "0 = retry forever."
+    ),
+)
+@click.option(
+    "--idle-timeout",
+    "idle_timeout",
+    default=600.0,
+    show_default=True,
+    type=click.FloatRange(min=0),
+    help="Exit after this many seconds with no clients (0 = never).",
+)
+@click.option(
+    "--stats",
+    "stats",
+    is_flag=True,
+    help="Also push CPU/temperature to the screen (off by default).",
+)
+@click.option(
+    "--verbose",
+    "-v",
+    "verbose",
+    is_flag=True,
+    help="Log debug output in addition to warnings.",
+)
+@click.argument(
+    "temp_key",
+    type=str,
+    required=False,
+    envvar="EPOMAKER_TEMP_KEY",
+    metavar="[TEMP_KEY]",
+)
+def serve(
+    temp_key: str | None,
+    test_mode: bool,
+    poll_interval: float,
+    reconnect_attempts: int,
+    idle_timeout: float,
+    stats: bool,
+    verbose: bool,
+) -> None:
+    """Run a daemon that serves GUI/CLI clients, without changing the screen.
+
+    This is what a client starts automatically when no daemon is running.  It
+    exits after --idle-timeout seconds with no clients, so it does not linger.
+    """
+    try:
+        code = run_daemon(
+            stats=stats,
+            temp_key=temp_key,
+            poll_interval_s=poll_interval,
+            test_mode=test_mode,
+            reconnect_attempts=reconnect_attempts,
+            idle_timeout_s=idle_timeout or None,
+            verbose=verbose,
+        )
+    except KeyboardInterrupt:
+        click.echo("Daemon interrupted by user.")
+        return
+    except Exception as e:
+        click.echo(f"Error in serve: {e}", err=True)
+        raise SystemExit(1) from e
+    raise SystemExit(code)
 
 
 @cli.command()
@@ -320,11 +427,13 @@ def run_set_keys_flow(saved_colours: dict | None = None) -> tuple[str | None, di
     import threading
     import time
 
-    controller = EpomakerController(CONFIG_MAIN)
-    with controller:
-        if not controller.open_device():
-            print("Failed to open device.")
-            return None, saved_colours or {}
+    backend = connect_backend(CONFIG_MAIN, direct=_direct_requested())
+    try:
+        if not backend.connected:
+            try:
+                backend.refresh_status()
+            except Exception:
+                pass
 
         root = tk.Tk()
         next_action = None
@@ -336,16 +445,16 @@ def run_set_keys_flow(saved_colours: dict | None = None) -> tuple[str | None, di
             running = False
             if thread.is_alive():
                 thread.join(timeout=0.5)
-            controller.close_device()
+            backend.close()
             window.destroy()
 
         gui = RGBKeyboardGUI(
             root,
             lambda x: None,
-            controller.config_layout,
-            controller.config_keymap,
+            backend.config_layout,
+            backend.config_keymap,
             switch_callback=on_switch,
-            controller=controller,
+            controller=backend,
             initial_colours=saved_colours,
         )
 
@@ -353,7 +462,7 @@ def run_set_keys_flow(saved_colours: dict | None = None) -> tuple[str | None, di
             last_colors = None
 
             while running:
-                if not running or controller.device is None:
+                if not running or not backend.connected:
                     break
 
                 # Keep keyboard lighting presets active unless customizing
@@ -369,12 +478,12 @@ def run_set_keys_flow(saved_colours: dict | None = None) -> tuple[str | None, di
                     current_colors = None
                     snap_frame = None
 
-                if not running or controller.device is None:
+                if not running or not backend.connected:
                     break
 
                 if current_colors is not None and current_colors != last_colors:
                     try:
-                        controller.send_keys([snap_frame])
+                        backend.send_keys([snap_frame])
                     except Exception as e:
                         gui.report_status(f"Device: error - {e}")
                     else:
@@ -391,7 +500,7 @@ def run_set_keys_flow(saved_colours: dict | None = None) -> tuple[str | None, di
             running = False
             if thread.is_alive():
                 thread.join(timeout=0.5)
-            controller.close_device()
+            backend.close()
             root.destroy()
 
         root.protocol("WM_DELETE_WINDOW", on_close)
@@ -401,6 +510,8 @@ def run_set_keys_flow(saved_colours: dict | None = None) -> tuple[str | None, di
             k.name: v for k, v in gui.key_colours.items() if v is not None
         }
         return next_action, current_colours_dict
+    finally:
+        backend.close()
 
 
 def run_screen_designer_flow(
@@ -416,10 +527,14 @@ def run_screen_designer_flow(
         next_action = "keys"
         if app.is_playing:
             app.is_playing = False
-        app.controller.close_device()
+        app.backend.close()
         window.destroy()
 
-    app = screen_designer_gui.ScreenDesignerApp(root, switch_callback=on_switch)
+    app = screen_designer_gui.ScreenDesignerApp(
+        root,
+        switch_callback=on_switch,
+        direct=_direct_requested(),
+    )
     if saved_state and saved_state.get("frames"):
         app.base_frames = saved_state["base_frames"]
         app.frames = saved_state["frames"]
@@ -433,7 +548,7 @@ def run_screen_designer_flow(
     def on_close() -> None:
         if app.is_playing:
             app.is_playing = False
-        app.controller.close_device()
+        app.backend.close()
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_close)

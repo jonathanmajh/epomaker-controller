@@ -167,18 +167,53 @@ epomakercontroller list-temp-devices
 epomakercontroller start-daemon              # CPU only
 epomakercontroller start-daemon coretemp-0   # CPU + named temp sensor
 epomakercontroller start-daemon --interval 5 coretemp-0   # slower refresh
+epomakercontroller serve                     # client socket, no stats, idle exit
 
 # Device debug
 epomakercontroller dev --print
 epomakercontroller dev --udev
 ```
 
+### The GUI and the daemon share one keyboard
+
+The daemon is the only process that holds the HID device. The CLI and both
+GUIs send it commands over a Unix socket in
+`$XDG_RUNTIME_DIR/epomaker-controller/daemon.sock` (same user only). That means
+you can open the screen designer or the key-backlight editor while
+`start-daemon` is running: the CPU/temperature loop pauses for your command and
+resumes afterwards.
+
+If no daemon is running, a client starts one automatically:
+
+- if the systemd user unit is installed, it runs `systemctl --user start
+  epomaker-daemon`;
+- otherwise it spawns `epomakercontroller serve`, which pushes no CPU/temp
+  values (so it never overwrites your screen design) and exits after 10
+  minutes with no clients.
+
+```bash
+epomakercontroller serve                 # explicit, no stats, idle exit
+epomakercontroller serve --stats         # also show CPU/temp
+epomakercontroller serve --idle-timeout 0  # stay up forever
+```
+
+For debugging, `--direct` (or `EPOMAKER_DIRECT=1`) keeps the old in-process
+HID path and does not use the daemon. `dev --print` and `dev --udev` always use
+the direct path.
+
+After upgrading the package, restart a running daemon so it speaks the current
+socket protocol:
+
+```bash
+systemctl --user restart epomaker-daemon
+```
+
 ### Run the daemon as a service
 
 `start-daemon` now reconnects with backoff if the keyboard is unplugged,
-asleep, or re-enumerated, and re-sends the clock periodically. To run it
-unattended, install the user unit plus a udev rule that starts it whenever
-the keyboard is plugged in:
+asleep, or re-enumerated, and re-sends the clock periodically. It also serves
+the GUI/CLI socket. To run it unattended, install the user unit plus a udev
+rule that starts it whenever the keyboard is plugged in:
 
 ```bash
 ./packaging/install-daemon.sh
