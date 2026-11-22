@@ -1,5 +1,6 @@
 """Controller dry-run and capability routing tests (no real HID traffic)."""
 
+import logging
 from unittest.mock import patch
 
 import pytest
@@ -342,3 +343,21 @@ def test_gpu_probe_retries_after_interval(main_config, monkeypatch) -> None:
     clock["now"] += sensors.NVIDIA_RETRY_INTERVAL_S
     assert sensors._has_nvidia_sensors() is False
     assert calls["n"] == 2
+
+
+def test_unknown_temp_key_warns_once(main_config, monkeypatch, caplog) -> None:
+    """A typo'd sensor key warns once, not every poll cycle."""
+    from epomakercontroller.utils import sensors
+
+    monkeypatch.setattr(sensors, "_WARNED_TEMP_KEYS", set())
+    monkeypatch.setattr(
+        sensors, "_get_temp_devices", lambda: {"coretemp-0": 40.0}
+    )
+
+    with caplog.at_level(logging.WARNING, logger="epomakercontroller.utils.sensors"):
+        assert sensors.get_device_temp("coretemp-1") == 0
+        assert sensors.get_device_temp("coretemp-1") == 0
+
+    warnings = [r for r in caplog.records if "not found" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "coretemp-0" in warnings[0].getMessage()

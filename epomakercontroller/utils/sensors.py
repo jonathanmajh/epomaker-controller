@@ -23,6 +23,11 @@ def get_cpu_usage(test_mode: bool = False) -> int:
     return int(round(psutil.cpu_percent(interval=1)))
 
 
+# Keys we've already complained about, so a typo warns once per run instead
+# of every poll cycle (the daemon would otherwise show 0 °C in silence).
+_WARNED_TEMP_KEYS: set[str] = set()
+
+
 def get_device_temp(temp_key: str, test_mode: bool = False) -> int:
     """Get the temperature of a device specified by `temp_key`, or 0 if the key cannot be found.
 
@@ -38,26 +43,32 @@ def get_device_temp(temp_key: str, test_mode: bool = False) -> int:
 
     temps = _get_temp_devices()
     if not temps:
+        if temp_key not in _WARNED_TEMP_KEYS:
+            _WARNED_TEMP_KEYS.add(temp_key)
+            log.warning(
+                "No temperature sensors found; the screen will show 0 °C."
+            )
         return 0
 
     if temp_key in temps:
         device_temp = temps[temp_key]
         return int(round(device_temp))
 
-    else:
-        available_keys = list(temps.keys())
-        log.debug(
-            "Temperature key %r not found. Available keys: %s",
+    if temp_key not in _WARNED_TEMP_KEYS:
+        _WARNED_TEMP_KEYS.add(temp_key)
+        log.warning(
+            "Temperature key %r not found. Available keys: %s "
+            "(check with `epomakercontroller list-temp-devices`)",
             temp_key,
-            available_keys,
+            list(temps.keys()),
         )
 
     return 0
 
 
-# How long to trust a failed NVIDIA probe before trying again. Long enough not
-# to hammer NVML every poll, short enough that loading the driver (or resuming
-# from suspend) is picked up without restarting the daemon.
+# How long to trust a failed NVIDIA probe before trying again. Long enough
+# not to hammer NVML every poll, short enough that loading the driver (or
+# resuming from suspend) is picked up without restarting the daemon.
 NVIDIA_RETRY_INTERVAL_S = 300.0
 
 # None = not probed yet, True/False = cached result of the NVIDIA probe.
@@ -75,9 +86,9 @@ def _invalidate_nvidia_probe() -> None:
 def _has_nvidia_sensors() -> bool:
     """Return whether gpustat could query the NVIDIA driver.
 
-    The result is cached so the poll loop does not re-run the NVML query — and
-    does not keep logging the same complaint — every cycle on machines without
-    an NVIDIA GPU. A negative answer is retried after
+    The result is cached so the poll loop does not re-run the NVML query —
+    and does not keep logging the same complaint — every cycle on machines
+    without an NVIDIA GPU. A negative answer is retried after
     ``NVIDIA_RETRY_INTERVAL_S`` so a driver loaded later is picked up.
     """
     global _NVIDIA_AVAILABLE, _NVIDIA_RETRY_AT
@@ -116,8 +127,8 @@ def _get_temp_devices() -> dict[str, float] | None:
             device_key = f"{device_name}-{index}"
             temperature_sensors[device_key] = entry.current
 
-    # Append any NVIDIA sensors (probe cached; a failure here must not take the
-    # daemon down, so fall back to the non-GPU sensors).
+    # Append any NVIDIA sensors (probe cached; a failure here must not take
+    # the daemon down, so fall back to the CPU/other sensors).
     gpu_stats = None
     if _has_nvidia_sensors():
         try:
