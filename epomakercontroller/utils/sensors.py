@@ -59,7 +59,7 @@ def _get_temp_devices() -> dict[str, float] | None:
     try:
         gpu_stats = gpustat.new_query()
     except OSError as e:
-        print(f"No NVIDIA sensors available: {e.message}")
+        print(f"No NVIDIA sensors available: {e}")
         gpu_stats = None
     except NVMLError as e:
         print(f"No NVIDIA driver available: {e}")
