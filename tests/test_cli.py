@@ -59,3 +59,47 @@ def test_start_daemon_interval_lower_bound(main_config, monkeypatch) -> None:
     result = runner.invoke(cli, ["start-daemon", "--interval", "0.2"])
     assert result.exit_code != 0
     assert "1.6" in result.output
+
+
+def test_start_daemon_reads_temp_key_from_env(main_config, monkeypatch) -> None:
+    """EPOMAKER_TEMP_KEY supplies TEMP_KEY, so the unit needs no edit."""
+    monkeypatch.setattr("epomakercontroller.cli.CONFIG_MAIN", main_config)
+    mock_ctl = MagicMock()
+    mock_ctl.__enter__.return_value = mock_ctl
+    # A MagicMock __exit__ returns a truthy value, which would swallow
+    # exceptions; the real controller returns None.
+    def _close(*_a):  # noqa: E306
+        mock_ctl.close_device()
+        return False  # don't swallow exceptions, like the real __exit__
+
+    mock_ctl.__exit__.side_effect = _close
+
+    with patch("epomakercontroller.cli.EpomakerController", return_value=mock_ctl):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["start-daemon"], env={"EPOMAKER_TEMP_KEY": "coretemp-0"}
+        )
+
+    assert result.exit_code == 0, result.output
+    assert mock_ctl.start_daemon.call_args[0][0] == "coretemp-0"
+
+
+def test_start_daemon_exits_nonzero_on_failure(main_config, monkeypatch) -> None:
+    """A fatal error must exit non-zero so systemd can restart the unit."""
+    monkeypatch.setattr("epomakercontroller.cli.CONFIG_MAIN", main_config)
+    mock_ctl = MagicMock()
+    mock_ctl.__enter__.return_value = mock_ctl
+
+    def _close(*_a):
+        mock_ctl.close_device()
+        return False  # don't swallow exceptions, like the real __exit__
+
+    mock_ctl.__exit__.side_effect = _close
+    mock_ctl.start_daemon.side_effect = RuntimeError("no device")
+
+    with patch("epomakercontroller.cli.EpomakerController", return_value=mock_ctl):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["start-daemon"])
+
+    assert result.exit_code == 1
+    assert "no device" in result.output

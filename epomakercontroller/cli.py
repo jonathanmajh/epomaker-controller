@@ -213,11 +213,20 @@ def send_cpu(cpu: int) -> None:
     is_flag=True,
     help="Log debug output (per-update sends) in addition to warnings.",
 )
-@click.argument("temp_key", type=str, required=False)
+@click.argument(
+    "temp_key",
+    type=str,
+    required=False,
+    envvar="EPOMAKER_TEMP_KEY",
+    metavar="[TEMP_KEY]",
+)
 def start_daemon(
     temp_key: str | None, test_mode: bool, poll_interval: float, verbose: bool
 ) -> None:
     """Start a daemon to update the CPU usage and optionally a temperature.
+
+    TEMP_KEY may also be supplied via the EPOMAKER_TEMP_KEY environment
+    variable, which is how the systemd unit passes it.
 
     Survives unplugging/sleeping the keyboard by reconnecting with backoff.
     Exits non-zero if the device cannot be recovered, so a service manager
