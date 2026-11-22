@@ -282,3 +282,63 @@ def test_daemon_clock_resync_can_be_disabled(main_config) -> None:
         ctl.start_daemon(None, False, poll_interval_s=0, clock_resync_s=0, _max_cycles=3)
 
     assert times.count("sent") == 1
+
+
+def test_gpu_query_error_does_not_escape(main_config, monkeypatch) -> None:
+    """A failing NVML query must not take the daemon down."""
+    from epomakercontroller.utils import sensors
+
+    monkeypatch.setattr(sensors, "_NVIDIA_AVAILABLE", None)
+    monkeypatch.setattr(sensors, "_NVIDIA_RETRY_AT", 0.0)
+    monkeypatch.setattr(sensors.psutil, "sensors_temperatures", lambda: {})
+
+    calls = {"n": 0}
+
+    def sometimes_broken(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # First call (the probe) succeeds so the result is cached True.
+            return [{"name": "GPU 0", "temperature.gpu": 50.0}]
+        raise sensors.NVMLError("driver reset")
+
+    monkeypatch.setattr(sensors.gpustat, "new_query", sometimes_broken)
+
+    # Probe caches True...
+    assert sensors._has_nvidia_sensors() is True
+    # ...and the later failure is swallowed rather than propagated, leaving
+    # just the non-GPU sensors (none, in this test).
+    assert sensors._get_temp_devices() == {}
+
+    # The failed probe is invalidated so a later poll retries.
+    assert sensors._NVIDIA_AVAILABLE is None
+
+
+def test_gpu_probe_retries_after_interval(main_config, monkeypatch) -> None:
+    """A driver loaded after login is picked up without a daemon restart."""
+    from epomakercontroller.utils import sensors
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(sensors.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(sensors, "_NVIDIA_AVAILABLE", None)
+    monkeypatch.setattr(sensors, "_NVIDIA_RETRY_AT", 0.0)
+
+    calls = {"n": 0}
+
+    def failing(*a, **k):
+        calls["n"] += 1
+        raise sensors.NVMLError("no driver")
+
+    monkeypatch.setattr(sensors.gpustat, "new_query", failing)
+
+    assert sensors._has_nvidia_sensors() is False
+    assert calls["n"] == 1
+
+    # Within the retry window the cached negative answer is reused.
+    clock["now"] += sensors.NVIDIA_RETRY_INTERVAL_S / 2
+    assert sensors._has_nvidia_sensors() is False
+    assert calls["n"] == 1
+
+    # After it, a fresh probe happens.
+    clock["now"] += sensors.NVIDIA_RETRY_INTERVAL_S
+    assert sensors._has_nvidia_sensors() is False
+    assert calls["n"] == 2

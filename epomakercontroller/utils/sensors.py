@@ -1,4 +1,5 @@
 import logging
+import time
 
 import psutil
 import random
@@ -54,16 +55,39 @@ def get_device_temp(temp_key: str, test_mode: bool = False) -> int:
     return 0
 
 
+# How long to trust a failed NVIDIA probe before trying again. Long enough not
+# to hammer NVML every poll, short enough that loading the driver (or resuming
+# from suspend) is picked up without restarting the daemon.
+NVIDIA_RETRY_INTERVAL_S = 300.0
+
+# None = not probed yet, True/False = cached result of the NVIDIA probe.
+_NVIDIA_AVAILABLE: bool | None = None
+_NVIDIA_RETRY_AT: float = 0.0
+
+
+def _invalidate_nvidia_probe() -> None:
+    """Forget the cached NVIDIA answer so the next call probes again."""
+    global _NVIDIA_AVAILABLE, _NVIDIA_RETRY_AT
+    _NVIDIA_AVAILABLE = None
+    _NVIDIA_RETRY_AT = 0.0
+
+
 def _has_nvidia_sensors() -> bool:
-    """Return True once if gpustat can query the NVIDIA driver.
+    """Return whether gpustat could query the NVIDIA driver.
 
-    The result is cached (including a negative one) so the poll loop does not
-    re-run ``nvidia-smi`` — and does not keep logging the same complaint —
-    every cycle on machines without an NVIDIA GPU.
+    The result is cached so the poll loop does not re-run the NVML query — and
+    does not keep logging the same complaint — every cycle on machines without
+    an NVIDIA GPU. A negative answer is retried after
+    ``NVIDIA_RETRY_INTERVAL_S`` so a driver loaded later is picked up.
     """
-    global _NVIDIA_AVAILABLE
+    global _NVIDIA_AVAILABLE, _NVIDIA_RETRY_AT
 
-    if _NVIDIA_AVAILABLE is None:
+    now = time.monotonic()
+    needs_probe = _NVIDIA_AVAILABLE is None or (
+        not _NVIDIA_AVAILABLE and now >= _NVIDIA_RETRY_AT
+    )
+
+    if needs_probe:
         try:
             _NVIDIA_AVAILABLE = bool(gpustat.new_query())
         except OSError as e:
@@ -72,12 +96,9 @@ def _has_nvidia_sensors() -> bool:
         except NVMLError as e:
             log.debug("No NVIDIA driver available: %s", e)
             _NVIDIA_AVAILABLE = False
+        _NVIDIA_RETRY_AT = now + NVIDIA_RETRY_INTERVAL_S
 
     return _NVIDIA_AVAILABLE
-
-
-# None = not probed yet, True/False = cached result of the NVIDIA probe.
-_NVIDIA_AVAILABLE: bool | None = None
 
 
 def _get_temp_devices() -> dict[str, float] | None:
@@ -95,8 +116,15 @@ def _get_temp_devices() -> dict[str, float] | None:
             device_key = f"{device_name}-{index}"
             temperature_sensors[device_key] = entry.current
 
-    # Append any NVIDIA sensors (probe cached: at most one nvidia-smi call)
-    gpu_stats = gpustat.new_query() if _has_nvidia_sensors() else None
+    # Append any NVIDIA sensors (probe cached; a failure here must not take the
+    # daemon down, so fall back to the non-GPU sensors).
+    gpu_stats = None
+    if _has_nvidia_sensors():
+        try:
+            gpu_stats = gpustat.new_query()
+        except (OSError, NVMLError) as e:
+            log.debug("GPU temperature query failed, continuing without: %s", e)
+            _invalidate_nvidia_probe()
     if gpu_stats:
         for index, gpu_stat in enumerate(gpu_stats):
             if "name" in gpu_stat.keys() and "temperature.gpu" in gpu_stat.keys():
