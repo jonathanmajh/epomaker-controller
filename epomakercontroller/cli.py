@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
@@ -205,9 +206,16 @@ def send_cpu(cpu: int) -> None:
     type=click.FloatRange(min=1.6),
     help="Minimum seconds between display updates (hardware limit: 1.6).",
 )
+@click.option(
+    "--verbose",
+    "-v",
+    "verbose",
+    is_flag=True,
+    help="Log debug output (per-update sends) in addition to warnings.",
+)
 @click.argument("temp_key", type=str, required=False)
 def start_daemon(
-    temp_key: str | None, test_mode: bool, poll_interval: float
+    temp_key: str | None, test_mode: bool, poll_interval: float, verbose: bool
 ) -> None:
     """Start a daemon to update the CPU usage and optionally a temperature.
 
@@ -215,6 +223,10 @@ def start_daemon(
     Exits non-zero if the device cannot be recovered, so a service manager
     (systemd ``Restart=on-failure``) can restart it.
     """
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     try:
         with open_controller(install_signal_handlers=True) as controller:
             controller.start_daemon(
