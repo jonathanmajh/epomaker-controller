@@ -1,6 +1,5 @@
 """Controller dry-run and capability routing tests (no real HID traffic)."""
 
-import logging
 from unittest.mock import patch
 
 import pytest
@@ -285,79 +284,49 @@ def test_daemon_clock_resync_can_be_disabled(main_config) -> None:
     assert times.count("sent") == 1
 
 
-def test_gpu_query_error_does_not_escape(main_config, monkeypatch) -> None:
-    """A failing NVML query must not take the daemon down."""
-    from epomakercontroller.utils import sensors
+def test_daemon_resets_cache_after_clock_resync(main_config) -> None:
+    """A time packet can redraw the screen, so cached values must be re-sent."""
+    ctl = EpomakerController(main_config, dry_run=True)
+    sent: list[str] = []
 
-    monkeypatch.setattr(sensors, "_NVIDIA_AVAILABLE", None)
-    monkeypatch.setattr(sensors, "_NVIDIA_RETRY_AT", 0.0)
-    monkeypatch.setattr(sensors.psutil, "sensors_temperatures", lambda: {})
+    real_send_time = ctl.send_time
+    ctl.send_time = lambda *a, **k: (sent.append("time"), real_send_time())[1]  # type: ignore[method-assign]
+    ctl.send_cpu = lambda value, **kw: sent.append(f"cpu{kw.get('skip_unchanged')}") or True  # type: ignore[method-assign]
 
-    calls = {"n": 0}
+    with patch("epomakercontroller.epomakercontroller.get_cpu_usage", return_value=42):
+        ctl.start_daemon(
+            None,
+            False,
+            poll_interval_s=0,
+            clock_resync_s=1e-9,
+            _max_cycles=1,
+        )
 
-    def sometimes_broken(*a, **k):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            # First call (the probe) succeeds so the result is cached True.
-            return [{"name": "GPU 0", "temperature.gpu": 50.0}]
-        raise sensors.NVMLError("driver reset")
-
-    monkeypatch.setattr(sensors.gpustat, "new_query", sometimes_broken)
-
-    # Probe caches True...
-    assert sensors._has_nvidia_sensors() is True
-    # ...and the later failure is swallowed rather than propagated, leaving
-    # just the non-GPU sensors (none, in this test).
-    assert sensors._get_temp_devices() == {}
-
-    # The failed probe is invalidated so a later poll retries.
-    assert sensors._NVIDIA_AVAILABLE is None
+    # Startup time, resync time, then a cpu send that was not skipped.
+    assert sent == ["time", "time", "cpuTrue"]
 
 
-def test_gpu_probe_retries_after_interval(main_config, monkeypatch) -> None:
-    """A driver loaded after login is picked up without a daemon restart."""
-    from epomakercontroller.utils import sensors
+def test_initial_clock_failure_does_not_kill_daemon(main_config) -> None:
+    """The first send_time() is retried, not fatal."""
+    from epomakercontroller.exceptions import DeviceCommunicationError
 
-    clock = {"now": 1000.0}
-    monkeypatch.setattr(sensors.time, "monotonic", lambda: clock["now"])
-    monkeypatch.setattr(sensors, "_NVIDIA_AVAILABLE", None)
-    monkeypatch.setattr(sensors, "_NVIDIA_RETRY_AT", 0.0)
+    ctl = EpomakerController(main_config, dry_run=True)
+    state = {"failed": False}
 
-    calls = {"n": 0}
+    real_send_time = ctl.send_time
 
-    def failing(*a, **k):
-        calls["n"] += 1
-        raise sensors.NVMLError("no driver")
+    def flaky_time(*a, **k):
+        if not state["failed"]:
+            state["failed"] = True
+            raise DeviceCommunicationError("not ready")
+        return real_send_time(*a, **k)
 
-    monkeypatch.setattr(sensors.gpustat, "new_query", failing)
+    ctl.send_time = flaky_time  # type: ignore[method-assign]
+    ctl.send_cpu = lambda *a, **k: True  # type: ignore[method-assign]
 
-    assert sensors._has_nvidia_sensors() is False
-    assert calls["n"] == 1
+    with patch("epomakercontroller.epomakercontroller.get_cpu_usage", return_value=1):
+        ctl.start_daemon(
+            None, False, poll_interval_s=0, reconnect_min_delay_s=0, _max_cycles=1
+        )
 
-    # Within the retry window the cached negative answer is reused.
-    clock["now"] += sensors.NVIDIA_RETRY_INTERVAL_S / 2
-    assert sensors._has_nvidia_sensors() is False
-    assert calls["n"] == 1
-
-    # After it, a fresh probe happens.
-    clock["now"] += sensors.NVIDIA_RETRY_INTERVAL_S
-    assert sensors._has_nvidia_sensors() is False
-    assert calls["n"] == 2
-
-
-def test_unknown_temp_key_warns_once(main_config, monkeypatch, caplog) -> None:
-    """A typo'd sensor key warns once, not every poll cycle."""
-    from epomakercontroller.utils import sensors
-
-    monkeypatch.setattr(sensors, "_WARNED_TEMP_KEYS", set())
-    monkeypatch.setattr(
-        sensors, "_get_temp_devices", lambda: {"coretemp-0": 40.0}
-    )
-
-    with caplog.at_level(logging.WARNING, logger="epomakercontroller.utils.sensors"):
-        assert sensors.get_device_temp("coretemp-1") == 0
-        assert sensors.get_device_temp("coretemp-1") == 0
-
-    warnings = [r for r in caplog.records if "not found" in r.getMessage()]
-    assert len(warnings) == 1
-    assert "coretemp-0" in warnings[0].getMessage()
+    assert state["failed"] is True

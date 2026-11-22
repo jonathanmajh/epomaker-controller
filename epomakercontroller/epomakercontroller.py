@@ -726,6 +726,17 @@ class EpomakerController:
 
         raise last_error if last_error else DeviceNotOpenError("Reconnect failed")
 
+    def _sync_clock_quietly(self) -> None:
+        """Send the clock, logging rather than raising on failure.
+
+        Used on paths where a failure must not kill the daemon: the next cycle
+        will notice the dead device and reconnect anyway.
+        """
+        try:
+            self.send_time()
+        except (DeviceCommunicationError, DeviceNotOpenError, OSError) as e:
+            log.warning("Clock sync failed, will retry: %s", e)
+
     def _daemon_cycle(
         self, temp_key: str | None, test_mode: bool, poll_interval_s: float
     ) -> None:
@@ -782,17 +793,33 @@ class EpomakerController:
             EpomakerError: If the device cannot be reopened after reconnecting.
             KeyboardInterrupt: On SIGINT/SIGTERM (clean shutdown).
         """
-        # Set current time and date
-        self.send_time()
+        # Set current time and date. Failures here are retried, not fatal.
         last_clock_sync = time.monotonic()
+        try:
+            self.send_time()
+        except (DeviceCommunicationError, DeviceNotOpenError, OSError) as e:
+            log.warning("Initial clock sync failed, reconnecting: %s", e)
+            self._reopen_with_backoff(
+                reconnect_attempts,
+                reconnect_min_delay_s,
+                reconnect_max_delay_s,
+            )
+            self._sync_clock_quietly()
 
         cycles = 0
         while True:
-            if clock_resync_s and time.monotonic() - last_clock_sync >= clock_resync_s:
-                self.send_time()
-                last_clock_sync = time.monotonic()
-
             try:
+                if (
+                    clock_resync_s
+                    and time.monotonic() - last_clock_sync >= clock_resync_s
+                ):
+                    self.send_time()
+                    last_clock_sync = time.monotonic()
+                    # A time packet can redraw the screen, so values we think
+                    # are already on it may no longer be. Re-send them.
+                    self._last_cpu = None
+                    self._last_temperature = None
+
                 self._daemon_cycle(temp_key, test_mode, poll_interval_s)
             except (DeviceCommunicationError, DeviceNotOpenError, OSError) as e:
                 log.warning("Device error, reconnecting: %s", e)
@@ -804,7 +831,8 @@ class EpomakerController:
                 # The screen lost its contents across the reconnect.
                 self._last_cpu = None
                 self._last_temperature = None
-                self.send_time()
+                last_clock_sync = time.monotonic()
+                self._sync_clock_quietly()
                 continue
 
             cycles += 1
