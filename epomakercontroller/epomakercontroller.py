@@ -5,6 +5,7 @@ for an Epomaker USB HID device.
 """
 
 import dataclasses
+import logging
 from datetime import datetime
 from json import dumps
 import os
@@ -48,6 +49,9 @@ from .exceptions import (
     DeviceNotOpenError,
     ProtocolError,
 )
+
+
+log = logging.getLogger(__name__)
 
 
 class EpomakerController:
@@ -583,7 +587,7 @@ class EpomakerController:
         if not self._assert_range(temperature):
             raise ValueError(f"Temperature must be in range 0-99: {temperature}")
         temperature_command = EpomakerTempCommand.EpomakerTempCommand(temperature)
-        print(f"Sending temperature {temperature}C")
+        log.debug("Sending temperature %sC", temperature)
         self._send_command(temperature_command)
 
     def send_cpu(self, cpu: int) -> None:
@@ -600,7 +604,7 @@ class EpomakerController:
         if not self._assert_range(cpu, range(0, 101)):
             raise ValueError("CPU percentage must be in range 0-100")
         cpu_command = EpomakerCpuCommand.EpomakerCpuCommand(cpu)
-        print(f"Sending CPU {cpu}%")
+        log.debug("Sending CPU %s%%", cpu)
         self._send_command(cpu_command)
 
     def set_rgb_all_keys(self, r: int, g: int, b: int) -> None:

@@ -1,7 +1,12 @@
+import logging
+
 import psutil
 import random
 import gpustat
 from pynvml import NVMLError
+
+log = logging.getLogger(__name__)
+
 
 def get_cpu_usage(test_mode: bool = False) -> int:
     """Get the current CPU usage.
@@ -40,30 +45,47 @@ def get_device_temp(temp_key: str, test_mode: bool = False) -> int:
 
     else:
         available_keys = list(temps.keys())
-        print(
-            (
-                f"Temperature key {temp_key!r} not found."
-                f"Available keys: {available_keys}"
-            )
+        log.debug(
+            "Temperature key %r not found. Available keys: %s",
+            temp_key,
+            available_keys,
         )
 
     return 0
+
+
+def _has_nvidia_sensors() -> bool:
+    """Return True once if gpustat can query the NVIDIA driver.
+
+    The result is cached (including a negative one) so the poll loop does not
+    re-run ``nvidia-smi`` — and does not keep logging the same complaint —
+    every cycle on machines without an NVIDIA GPU.
+    """
+    global _NVIDIA_AVAILABLE
+
+    if _NVIDIA_AVAILABLE is None:
+        try:
+            _NVIDIA_AVAILABLE = bool(gpustat.new_query())
+        except OSError as e:
+            log.debug("No NVIDIA sensors available: %s", e)
+            _NVIDIA_AVAILABLE = False
+        except NVMLError as e:
+            log.debug("No NVIDIA driver available: %s", e)
+            _NVIDIA_AVAILABLE = False
+
+    return _NVIDIA_AVAILABLE
+
+
+# None = not probed yet, True/False = cached result of the NVIDIA probe.
+_NVIDIA_AVAILABLE: bool | None = None
 
 
 def _get_temp_devices() -> dict[str, float] | None:
     try:
         hw_temperatures = psutil.sensors_temperatures()
     except AttributeError:
-        print("Temperature monitoring not supported on this system.")
+        log.warning("Temperature monitoring not supported on this system.")
         return None
-    try:
-        gpu_stats = gpustat.new_query()
-    except OSError as e:
-        print(f"No NVIDIA sensors available: {e}")
-        gpu_stats = None
-    except NVMLError as e:
-        print(f"No NVIDIA driver available: {e}")
-        gpu_stats = None
 
     temperature_sensors: dict[str, float] = {}
     for device_name, entries in hw_temperatures.items():
@@ -73,7 +95,8 @@ def _get_temp_devices() -> dict[str, float] | None:
             device_key = f"{device_name}-{index}"
             temperature_sensors[device_key] = entry.current
 
-    # Append any NVIDIA sensors
+    # Append any NVIDIA sensors (probe cached: at most one nvidia-smi call)
+    gpu_stats = gpustat.new_query() if _has_nvidia_sensors() else None
     if gpu_stats:
         for index, gpu_stat in enumerate(gpu_stats):
             if "name" in gpu_stat.keys() and "temperature.gpu" in gpu_stat.keys():
