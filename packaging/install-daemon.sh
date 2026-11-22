@@ -66,10 +66,13 @@ echo "Installed and started."
 echo "  status: systemctl --user status ${UNIT_NAME}"
 echo "  logs:   journalctl --user -u ${UNIT_NAME} -f"
 echo
-echo "Unplug and replug the keyboard to confirm the udev rule starts it."
+echo "To check that the udev rule starts it: stop it (systemctl --user stop ${UNIT_NAME}),"
+echo "unplug and replug the keyboard, then look at the status above."
 echo
-echo "If the keyboard is absent at login the daemon gives up after"
-echo "StartLimitBurst restarts; replugging starts it again via udev. A"
-echo "keyboard lost mid-session is ridden out by the daemon's backoff."
+echo "The daemon waits for the keyboard if it is absent or unplugged and"
+echo "reconnects on its own, so it keeps running either way."
+echo "If the unit ever lands in a failed state after a crash loop, run:"
+echo "  systemctl --user reset-failed ${UNIT_NAME}"
+echo
 echo "To show a temperature too, run: systemctl --user edit ${UNIT_NAME}"
 echo "and set Environment=EPOMAKER_TEMP_KEY=coretemp-0."

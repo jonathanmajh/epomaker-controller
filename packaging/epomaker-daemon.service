@@ -5,11 +5,12 @@ Documentation=https://github.com/jonathanmajh/epomaker-controller
 # active seat an ACL (TAG+="uaccess") before starting.
 After=graphical-session.target
 PartOf=graphical-session.target
-# When the keyboard is absent at login, a failure cycle takes roughly 20s
-# (5 backoff attempts + RestartSec), i.e. ~3 restarts/minute. Allow 5 in 5
-# minutes so that trips and the unit stops instead of retrying forever;
-# replugging starts it again via 70-epomaker-daemon.rules. A keyboard lost
-# mid-session is ridden out by the daemon's own backoff.
+# The daemon waits for a missing keyboard itself (it retries forever, backing
+# off to one attempt every 30s), so an absent or unplugged keyboard never makes
+# the process exit. This limit is only a brake for genuine crash loops, e.g. a
+# broken install: 5 failed starts in 5 minutes and systemd stops retrying.
+# (A start request that arrives from udev inside that window is refused too;
+# `systemctl --user reset-failed epomaker-daemon` clears it.)
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
@@ -18,8 +19,8 @@ Type=simple
 # install-daemon.sh rewrites this to the absolute path of the
 # epomakercontroller that is on PATH (i.e. the one in your venv).
 ExecStart=/usr/bin/env epomakercontroller start-daemon
-# Restart after a crash or a fatal device error. The daemon already retries
-# with backoff internally; this covers the case where it gives up entirely.
+# Restart after a crash. Device errors don't count: the daemon retries those
+# forever on its own (--reconnect-attempts defaults to 0 = no limit).
 Restart=on-failure
 RestartSec=5s
 # Set EPOMAKER_TEMP_KEY to show a temperature as well, e.g.:

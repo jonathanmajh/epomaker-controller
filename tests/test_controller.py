@@ -330,3 +330,153 @@ def test_initial_clock_failure_does_not_kill_daemon(main_config) -> None:
         )
 
     assert state["failed"] is True
+
+
+def _stub_daemon_io(ctl: EpomakerController) -> None:
+    """Make the daemon's HID writes no-ops so only control flow is tested."""
+    ctl.send_cpu = lambda *a, **k: True  # type: ignore[method-assign]
+    ctl.send_temperature = lambda *a, **k: True  # type: ignore[method-assign]
+
+
+def test_reconnect_attempts_zero_retries_forever(main_config) -> None:
+    """With max_attempts=0 a long outage is waited out, with capped backoff."""
+    from epomakercontroller.exceptions import DeviceCommunicationError
+
+    ctl = EpomakerController(main_config, dry_run=True)
+    ctl.send_time = lambda *a, **k: None  # type: ignore[method-assign]
+    failures = {"n": 1}
+
+    def flaky_cpu(value: int, **kwargs: object) -> bool:
+        if failures["n"]:
+            failures["n"] -= 1
+            raise DeviceCommunicationError("unplugged")
+        return True
+
+    ctl.send_cpu = flaky_cpu  # type: ignore[method-assign]
+    ctl.send_temperature = lambda *a, **k: True  # type: ignore[method-assign]
+
+    # Keyboard stays away for 7 attempts, far past the old limit of 5.
+    open_results = [DeviceNotOpenError("gone")] * 7 + [True]
+    sleeps: list[float] = []
+
+    with patch.object(ctl, "open_device", side_effect=open_results) as mock_open:
+        with patch("epomakercontroller.epomakercontroller.time.sleep", sleeps.append):
+            with patch(
+                "epomakercontroller.epomakercontroller.get_cpu_usage", return_value=3
+            ):
+                ctl.start_daemon(
+                    None,
+                    False,
+                    poll_interval_s=0,
+                    reconnect_attempts=0,
+                    reconnect_min_delay_s=1,
+                    reconnect_max_delay_s=4,
+                    _max_cycles=1,
+                )
+
+    assert mock_open.call_count == 8
+    assert sleeps == [1, 2, 4, 4, 4, 4, 4]  # doubles, then stays at the cap
+
+
+def test_reconnect_attempts_nonzero_still_gives_up(main_config) -> None:
+    """A non-zero limit keeps the old behaviour: raise after N attempts."""
+    ctl = EpomakerController(main_config, dry_run=True)
+    with patch.object(
+        ctl, "open_device", side_effect=DeviceNotOpenError("gone")
+    ) as mock_open:
+        with patch("epomakercontroller.epomakercontroller.time.sleep"):
+            with pytest.raises(DeviceNotOpenError):
+                ctl._reopen_with_backoff(3, 1, 4)
+    assert mock_open.call_count == 3
+
+
+def test_daemon_waits_for_keyboard_at_startup(main_config) -> None:
+    """wait_for_device: a keyboard that isn't plugged in yet is waited for."""
+    ctl = EpomakerController(main_config)  # not a dry run: really "opens"
+    ctl.send_time = lambda *a, **k: None  # type: ignore[method-assign]
+    _stub_daemon_io(ctl)
+    open_results = [DeviceNotOpenError("absent")] * 2 + [True]
+
+    with patch.object(ctl, "open_device", side_effect=open_results) as mock_open:
+        with patch("epomakercontroller.epomakercontroller.time.sleep"):
+            with patch(
+                "epomakercontroller.epomakercontroller.get_cpu_usage", return_value=3
+            ):
+                ctl.start_daemon(
+                    None,
+                    False,
+                    poll_interval_s=0,
+                    reconnect_attempts=0,
+                    wait_for_device=True,
+                    _max_cycles=1,
+                )
+
+    assert mock_open.call_count == 3
+
+
+def test_daemon_does_not_open_device_unless_asked(main_config) -> None:
+    """Without wait_for_device the daemon assumes the caller opened it."""
+    ctl = EpomakerController(main_config)
+    ctl.send_time = lambda *a, **k: None  # type: ignore[method-assign]
+    _stub_daemon_io(ctl)
+
+    with patch.object(ctl, "open_device") as mock_open:
+        with patch(
+            "epomakercontroller.epomakercontroller.get_cpu_usage", return_value=3
+        ):
+            ctl.start_daemon(None, False, poll_interval_s=0, _max_cycles=1)
+
+    mock_open.assert_not_called()
+
+
+def test_sync_clock_quietly_reports_success_and_failure(main_config) -> None:
+    from epomakercontroller.exceptions import DeviceCommunicationError
+
+    ctl = EpomakerController(main_config, dry_run=True)
+    assert ctl._sync_clock_quietly() is True
+
+    def boom(*a, **k):
+        raise DeviceCommunicationError("nope")
+
+    ctl.send_time = boom  # type: ignore[method-assign]
+    assert ctl._sync_clock_quietly() is False
+
+
+def test_clock_sync_failed_after_reconnect_is_retried_next_cycle(main_config) -> None:
+    """A clock send that fails right after a reconnect is retried promptly,
+    not left for the hourly resync (which is disabled here to prove it)."""
+    from epomakercontroller.exceptions import DeviceCommunicationError
+
+    ctl = EpomakerController(main_config, dry_run=True)
+    time_calls = {"n": 0}
+
+    def flaky_time(*a, **k) -> None:
+        time_calls["n"] += 1
+        # 1 = startup (ok), 2 = quiet sync after the reconnect (fails),
+        # 3 = the retry at the top of the next iteration (ok).
+        if time_calls["n"] == 2:
+            raise DeviceCommunicationError("not ready yet")
+
+    ctl.send_time = flaky_time  # type: ignore[method-assign]
+    cpu_state = {"failed": False}
+
+    def cpu_fails_once(value: int, **kwargs: object) -> bool:
+        if not cpu_state["failed"]:
+            cpu_state["failed"] = True
+            raise DeviceCommunicationError("cable yanked")
+        return True
+
+    ctl.send_cpu = cpu_fails_once  # type: ignore[method-assign]
+    ctl.send_temperature = lambda *a, **k: True  # type: ignore[method-assign]
+
+    with patch("epomakercontroller.epomakercontroller.get_cpu_usage", return_value=7):
+        ctl.start_daemon(
+            None,
+            False,
+            poll_interval_s=0,
+            reconnect_min_delay_s=0,
+            clock_resync_s=0,
+            _max_cycles=1,
+        )
+
+    assert time_calls["n"] == 3

@@ -103,3 +103,61 @@ def test_start_daemon_exits_nonzero_on_failure(main_config, monkeypatch) -> None
 
     assert result.exit_code == 1
     assert "no device" in result.output
+
+
+def _daemon_mock_controller() -> MagicMock:
+    mock_ctl = MagicMock()
+    mock_ctl.__enter__.return_value = mock_ctl
+
+    def _close(*_a):
+        mock_ctl.close_device()
+        return False  # don't swallow exceptions, like the real __exit__
+
+    mock_ctl.__exit__.side_effect = _close
+    return mock_ctl
+
+
+def test_start_daemon_waits_for_keyboard_by_default(main_config, monkeypatch) -> None:
+    """The CLI must not fail up front when the keyboard is absent: it hands
+    the opening to the daemon, which retries forever by default."""
+    monkeypatch.setattr("epomakercontroller.cli.CONFIG_MAIN", main_config)
+    mock_ctl = _daemon_mock_controller()
+
+    with patch("epomakercontroller.cli.EpomakerController", return_value=mock_ctl):
+        result = CliRunner().invoke(cli, ["start-daemon"])
+
+    assert result.exit_code == 0, result.output
+    mock_ctl.open_device.assert_not_called()
+    kwargs = mock_ctl.start_daemon.call_args.kwargs
+    assert kwargs["wait_for_device"] is True
+    assert kwargs["reconnect_attempts"] == 0
+
+
+def test_start_daemon_reconnect_attempts_option(main_config, monkeypatch) -> None:
+    monkeypatch.setattr("epomakercontroller.cli.CONFIG_MAIN", main_config)
+    mock_ctl = _daemon_mock_controller()
+
+    with patch("epomakercontroller.cli.EpomakerController", return_value=mock_ctl):
+        result = CliRunner().invoke(cli, ["start-daemon", "--reconnect-attempts", "3"])
+
+    assert result.exit_code == 0, result.output
+    assert mock_ctl.start_daemon.call_args.kwargs["reconnect_attempts"] == 3
+
+
+def test_start_daemon_reconnect_attempts_rejects_negative(
+    main_config, monkeypatch
+) -> None:
+    monkeypatch.setattr("epomakercontroller.cli.CONFIG_MAIN", main_config)
+    result = CliRunner().invoke(cli, ["start-daemon", "--reconnect-attempts", "-1"])
+    assert result.exit_code != 0
+
+
+def test_open_controller_connect_false_does_not_open(main_config, monkeypatch) -> None:
+    monkeypatch.setattr("epomakercontroller.cli.CONFIG_MAIN", main_config)
+    mock_ctl = _daemon_mock_controller()
+
+    with patch("epomakercontroller.cli.EpomakerController", return_value=mock_ctl):
+        with open_controller(connect=False):
+            pass
+
+    mock_ctl.open_device.assert_not_called()

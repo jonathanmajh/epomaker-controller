@@ -53,6 +53,11 @@ from .exceptions import (
 
 log = logging.getLogger(__name__)
 
+# While waiting for a missing keyboard, log a warning on this many attempts
+# (after the first few) and keep the rest at DEBUG. At the 30s backoff cap
+# this is one warning every 10 minutes.
+_RECONNECT_LOG_EVERY = 20
+
 
 class EpomakerController:
     """EpomakerController class represents a controller for an Epomaker USB HID device.
@@ -698,44 +703,64 @@ class EpomakerController:
         re-enumerated. Each attempt re-enumerates from scratch, so a device that
         comes back at a different hidraw path is picked up.
 
+        Args:
+            max_attempts: Open attempts before giving up. ``0`` means retry
+                forever (the delay stays capped at *max_delay_s*), which is
+                what an unattended daemon wants: a keyboard that is unplugged
+                for minutes or hours is picked up whenever it comes back.
+            min_delay_s: First backoff delay in seconds.
+            max_delay_s: Cap for the exponential backoff.
+
         Raises:
-            EpomakerError: The last open error, once *max_attempts* is reached.
+            EpomakerError: The last open error, once a non-zero *max_attempts*
+                is reached. Never raised when *max_attempts* is ``0``.
         """
         delay = min_delay_s
-        last_error: Exception | None = None
+        attempt = 0
 
-        for attempt in range(1, max_attempts + 1):
+        while True:
+            attempt += 1
             self.close_device()
             try:
                 if self.open_device():
                     log.info("Reconnected to keyboard on attempt %d", attempt)
                     return
-                last_error = DeviceNotOpenError("Device did not open")
+                last_error: Exception = DeviceNotOpenError("Device did not open")
             except (DeviceNotOpenError, OSError) as e:
                 last_error = e
 
-            log.warning(
-                "Reconnect attempt %d/%d failed: %s",
+            # Don't write a warning every 30s for days: the first few attempts
+            # and then one in every _RECONNECT_LOG_EVERY are warnings.
+            noisy = attempt <= 5 or attempt % _RECONNECT_LOG_EVERY == 0
+            log.log(
+                logging.WARNING if noisy else logging.DEBUG,
+                "Reconnect attempt %d%s failed: %s",
                 attempt,
-                max_attempts,
+                f"/{max_attempts}" if max_attempts else "",
                 last_error,
             )
-            if attempt < max_attempts:
-                time.sleep(delay)
-                delay = min(delay * 2, max_delay_s)
+            if max_attempts and attempt >= max_attempts:
+                raise last_error
 
-        raise last_error if last_error else DeviceNotOpenError("Reconnect failed")
+            time.sleep(delay)
+            delay = min(delay * 2, max_delay_s)
 
-    def _sync_clock_quietly(self) -> None:
+    def _sync_clock_quietly(self) -> bool:
         """Send the clock, logging rather than raising on failure.
 
-        Used on paths where a failure must not kill the daemon: the next cycle
-        will notice the dead device and reconnect anyway.
+        Used on paths where a failure must not kill the daemon.
+
+        Returns:
+            bool: True if the clock was sent. On False the caller must retry
+                the sync itself; the next daemon cycle only notices a dead
+                device, not a clock that is still unset.
         """
         try:
             self.send_time()
         except (DeviceCommunicationError, DeviceNotOpenError, OSError) as e:
             log.warning("Clock sync failed, will retry: %s", e)
+            return False
+        return True
 
     def _daemon_cycle(
         self, temp_key: str | None, test_mode: bool, poll_interval_s: float
@@ -766,6 +791,7 @@ class EpomakerController:
         reconnect_min_delay_s: float = 1.0,
         reconnect_max_delay_s: float = 30.0,
         clock_resync_s: float = 3600.0,
+        wait_for_device: bool = False,
         _max_cycles: int | None = None,
     ) -> None:
         """Start a daemon to update the CPU usage and optionally a temperature.
@@ -777,24 +803,40 @@ class EpomakerController:
         send closes the HID handle and retries with exponential backoff. If the
         keyboard cannot be reopened after ``reconnect_attempts`` tries, the last
         error propagates so a supervisor (e.g. systemd ``Restart=on-failure``)
-        can restart the daemon.
+        can restart the daemon. With ``reconnect_attempts=0`` it never gives
+        up, so the daemon simply waits for the keyboard to come back.
 
         Args:
             temp_key (str): A label corresponding to the device to monitor.
             test_mode (bool): Send random ints instead of real values.
             poll_interval_s (float): Minimum seconds between display updates.
-            reconnect_attempts (int): Open attempts before giving up.
+            reconnect_attempts (int): Open attempts before giving up; 0 means
+                retry forever.
             reconnect_min_delay_s (float): First backoff delay in seconds.
             reconnect_max_delay_s (float): Cap for the exponential backoff.
             clock_resync_s (float): Re-send the clock this often (seconds), in
                 case the keyboard loses time across sleep or power loss.
+            wait_for_device (bool): The device has not been opened yet; open
+                it first, with the same backoff, instead of failing at once
+                when the keyboard is not plugged in.
 
         Raises:
-            EpomakerError: If the device cannot be reopened after reconnecting.
+            EpomakerError: If the device cannot be reopened after reconnecting
+                (only when ``reconnect_attempts`` is non-zero).
             KeyboardInterrupt: On SIGINT/SIGTERM (clean shutdown).
         """
+        if wait_for_device and not self.dry_run:
+            log.info("Waiting for the keyboard...")
+            self._reopen_with_backoff(
+                reconnect_attempts,
+                reconnect_min_delay_s,
+                reconnect_max_delay_s,
+            )
+
         # Set current time and date. Failures here are retried, not fatal.
         last_clock_sync = time.monotonic()
+        # True while the clock still needs sending after a failed attempt.
+        clock_pending = False
         try:
             self.send_time()
         except (DeviceCommunicationError, DeviceNotOpenError, OSError) as e:
@@ -804,17 +846,18 @@ class EpomakerController:
                 reconnect_min_delay_s,
                 reconnect_max_delay_s,
             )
-            self._sync_clock_quietly()
+            clock_pending = not self._sync_clock_quietly()
 
         cycles = 0
         while True:
             try:
-                if (
+                if clock_pending or (
                     clock_resync_s
                     and time.monotonic() - last_clock_sync >= clock_resync_s
                 ):
                     self.send_time()
                     last_clock_sync = time.monotonic()
+                    clock_pending = False
                     # A time packet can redraw the screen, so values we think
                     # are already on it may no longer be. Re-send them.
                     self._last_cpu = None
@@ -831,8 +874,11 @@ class EpomakerController:
                 # The screen lost its contents across the reconnect.
                 self._last_cpu = None
                 self._last_temperature = None
-                last_clock_sync = time.monotonic()
-                self._sync_clock_quietly()
+                # If the clock can't be sent now, retry it at the top of the
+                # next iteration instead of waiting for the hourly resync.
+                clock_pending = not self._sync_clock_quietly()
+                if not clock_pending:
+                    last_clock_sync = time.monotonic()
                 continue
 
             cycles += 1

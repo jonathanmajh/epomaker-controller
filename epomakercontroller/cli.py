@@ -26,11 +26,16 @@ def open_controller(
     dry_run: bool = False,
     only_info: bool = False,
     install_signal_handlers: bool = False,
+    connect: bool = True,
 ) -> Iterator[EpomakerController]:
     """Open a controller and always close it on exit.
 
     Yields an open :class:`EpomakerController`. On failure to open, raises
     :class:`DeviceNotOpenError` (or other controller errors).
+
+    With ``connect=False`` the device is not opened here: the caller is
+    expected to open it itself (the daemon does, with retries, so that a
+    missing keyboard at startup is waited for rather than treated as fatal).
     """
     controller = EpomakerController(
         CONFIG_MAIN,
@@ -38,7 +43,7 @@ def open_controller(
         install_signal_handlers=install_signal_handlers,
     )
     with controller:
-        if not controller.open_device(only_info=only_info):
+        if connect and not controller.open_device(only_info=only_info):
             raise DeviceNotOpenError("Failed to open device.")
         yield controller
 
@@ -207,6 +212,18 @@ def send_cpu(cpu: int) -> None:
     help="Minimum seconds between display updates (hardware limit: 1.6).",
 )
 @click.option(
+    "--reconnect-attempts",
+    "reconnect_attempts",
+    default=0,
+    show_default=True,
+    type=click.IntRange(min=0),
+    help=(
+        "Open attempts (with exponential backoff, capped at 30s) before "
+        "giving up when the keyboard is missing, at startup or after an "
+        "unplug. 0 = retry forever."
+    ),
+)
+@click.option(
     "--verbose",
     "-v",
     "verbose",
@@ -221,25 +238,37 @@ def send_cpu(cpu: int) -> None:
     metavar="[TEMP_KEY]",
 )
 def start_daemon(
-    temp_key: str | None, test_mode: bool, poll_interval: float, verbose: bool
+    temp_key: str | None,
+    test_mode: bool,
+    poll_interval: float,
+    reconnect_attempts: int,
+    verbose: bool,
 ) -> None:
     """Start a daemon to update the CPU usage and optionally a temperature.
 
     TEMP_KEY may also be supplied via the EPOMAKER_TEMP_KEY environment
     variable, which is how the systemd unit passes it.
 
-    Survives unplugging/sleeping the keyboard by reconnecting with backoff.
-    Exits non-zero if the device cannot be recovered, so a service manager
-    (systemd ``Restart=on-failure``) can restart it.
+    Waits for the keyboard if it is not plugged in yet, and survives
+    unplugging/sleeping it by reconnecting with backoff. By default it retries
+    forever; with --reconnect-attempts N it exits non-zero after N failed
+    attempts so a service manager (systemd ``Restart=on-failure``) can
+    restart it.
     """
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     try:
-        with open_controller(install_signal_handlers=True) as controller:
+        with open_controller(
+            install_signal_handlers=True, connect=False
+        ) as controller:
             controller.start_daemon(
-                temp_key, test_mode, poll_interval_s=poll_interval
+                temp_key,
+                test_mode,
+                poll_interval_s=poll_interval,
+                reconnect_attempts=reconnect_attempts,
+                wait_for_device=True,
             )
     except KeyboardInterrupt:
         click.echo("Daemon interrupted by user.")

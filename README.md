@@ -231,14 +231,22 @@ Then reboot (or replug) and check `systemctl --user status epomaker-daemon`.
 
 #### What happens when the keyboard goes away
 
-The daemon reconnects with exponential backoff (1s → 30s, 5 attempts) when a
-send fails, so a brief unplug or a suspend/resume cycle is ridden out. If it
-cannot reopen the device it exits non-zero and systemd restarts it
-(`Restart=on-failure`). When the keyboard is absent at login each failure cycle
-takes roughly 20s, so the restart limit (`StartLimitBurst=5` in 5 minutes) is
-reached and the unit stops retrying — replugging starts it again through the
-udev rule. If the keyboard disappears mid-session, the daemon's own backoff
-rides it out without systemd restarting anything.
+The daemon never gives up on the keyboard by default. If it is not plugged in
+when the daemon starts, or a send fails later (unplug, suspend/resume, mode
+switch), it closes the device and retries with exponential backoff
+(1s → 2s → … capped at 30s) until the keyboard is back, then re-sends the
+clock and the current values. While waiting it logs the first few attempts as
+warnings and then one warning every ~10 minutes (`-v` shows every attempt).
+
+Because a missing keyboard no longer makes the process exit, systemd's
+`Restart=on-failure` and start limit (`StartLimitBurst=5` in 5 minutes) only
+come into play for real crashes. If the unit ever ends up in the `failed`
+state after a crash loop, clear it with
+`systemctl --user reset-failed epomaker-daemon` (a replug alone won't start it
+while the start limit is active).
+
+To make the daemon give up instead, so a supervisor can handle it, pass
+`--reconnect-attempts N` (it then exits non-zero after N failed attempts).
 
 ### Library-style usage (optional)
 ```python
