@@ -1,0 +1,25 @@
+[Unit]
+Description=Epomaker keyboard status daemon (CPU / temperature on the screen)
+Documentation=https://github.com/jonathanmajh/epomaker-controller
+# The daemon talks to a USB HID device; make sure udev has granted the
+# active seat an ACL (TAG+="uaccess") before starting.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+# %h is the user's home; the venv created by the README lives there.
+ExecStart=%h/.venv/bin/epomakercontroller start-daemon
+# Restart after a crash or a fatal device error, but don't spin forever on a
+# config problem: give up after 5 tries in a minute and let the user look.
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=60
+StartLimitBurst=5
+# The daemon reconnects with backoff on its own, so a simple restart is enough.
+TimeoutStopSec=10
+# Send logs to the journal at INFO; the per-update lines are DEBUG.
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

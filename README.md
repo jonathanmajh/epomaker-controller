@@ -166,11 +166,33 @@ epomakercontroller show-keymap --filter enter
 epomakercontroller list-temp-devices
 epomakercontroller start-daemon              # CPU only
 epomakercontroller start-daemon coretemp-0   # CPU + named temp sensor
+epomakercontroller start-daemon --interval 5 coretemp-0   # slower refresh
 
 # Device debug
 epomakercontroller dev --print
 epomakercontroller dev --udev
 ```
+
+### Run the daemon as a service
+
+`start-daemon` now reconnects with backoff if the keyboard is unplugged,
+asleep, or re-enumerated, and re-sends the clock periodically. To run it
+unattended, install the user unit plus a udev rule that starts it whenever
+the keyboard is plugged in:
+
+```bash
+./packaging/install-daemon.sh
+```
+
+```bash
+systemctl --user status epomaker-daemon    # status
+journalctl --user -u epomaker-daemon -f    # logs
+./packaging/install-daemon.sh --uninstall  # remove
+```
+
+The unit runs `epomakercontroller start-daemon` from your venv
+(`~/.venv/bin` by default) with `Restart=on-failure`. It needs the uaccess
+udev rule from `setup_udev.sh`, so run that first.
 
 ### Library-style usage (optional)
 ```python
