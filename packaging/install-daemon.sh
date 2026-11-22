@@ -5,9 +5,9 @@
 #   ./packaging/install-daemon.sh            # install + enable + start now
 #   ./packaging/install-daemon.sh --uninstall
 #
-# The unit runs: %h/.venv/bin/epomakercontroller start-daemon
-# (the venv location from the README). Override with EPW_PYTHON if your
-# install lives elsewhere.
+# The unit runs `epomakercontroller start-daemon`, rewritten to the absolute
+# path of the executable currently on PATH (usually your venv). Activate the
+# venv before running this script, or call the venv binary by path.
 set -euo pipefail
 
 UNIT_NAME="epomaker-daemon.service"
@@ -45,8 +45,10 @@ fi
 
 echo "Installing ${UNIT_NAME} to ${UNIT_DIR}..."
 mkdir -p "${UNIT_DIR}"
-sed "s|^ExecStart=.*|ExecStart=$(command -v epomakercontroller) start-daemon|" \
+EPW_BIN="$(command -v epomakercontroller)"
+sed "s|^ExecStart=.*|ExecStart=${EPW_BIN} start-daemon|" \
     "${SCRIPT_DIR}/${UNIT_NAME}" > "${UNIT_DIR}/${UNIT_NAME}"
+chmod 644 "${UNIT_DIR}/${UNIT_NAME}"
 
 echo "Installing ${RULE_NAME} to ${RULE_DIR}..."
 sudo tee "${RULE_DIR}/${RULE_NAME}" >/dev/null < "${SCRIPT_DIR}/${RULE_NAME}"

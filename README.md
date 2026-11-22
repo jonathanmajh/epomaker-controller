@@ -190,9 +190,9 @@ journalctl --user -u epomaker-daemon -f    # logs
 ./packaging/install-daemon.sh --uninstall  # remove
 ```
 
-The unit runs `epomakercontroller start-daemon` from your venv
-(`~/.venv/bin` by default) with `Restart=on-failure`. It needs the uaccess
-udev rule from `setup_udev.sh`, so run that first.
+Activate the venv first — the installer pins `ExecStart` to the
+`epomakercontroller` on `PATH`. The unit uses `Restart=on-failure` and needs
+the uaccess udev rule from `setup_udev.sh`, so run that first.
 
 ### Library-style usage (optional)
 ```python
