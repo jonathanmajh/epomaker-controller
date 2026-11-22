@@ -686,12 +686,74 @@ class EpomakerController:
         profile_command = EpomakerProfileCommand.EpomakerProfileCommand(profile)
         self._send_command(profile_command)
 
+    def _reopen_with_backoff(
+        self,
+        max_attempts: int,
+        min_delay_s: float,
+        max_delay_s: float,
+    ) -> None:
+        """Close and reopen the HID device, retrying with exponential backoff.
+
+        Used when a send fails: the keyboard may have been unplugged, slept, or
+        re-enumerated. Each attempt re-enumerates from scratch, so a device that
+        comes back at a different hidraw path is picked up.
+
+        Raises:
+            EpomakerError: The last open error, once *max_attempts* is reached.
+        """
+        delay = min_delay_s
+        last_error: Exception | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            self.close_device()
+            try:
+                if self.open_device():
+                    log.info("Reconnected to keyboard on attempt %d", attempt)
+                    return
+                last_error = DeviceNotOpenError("Device did not open")
+            except (DeviceNotOpenError, OSError) as e:
+                last_error = e
+
+            log.warning(
+                "Reconnect attempt %d/%d failed: %s",
+                attempt,
+                max_attempts,
+                last_error,
+            )
+            if attempt < max_attempts:
+                time.sleep(delay)
+                delay = min(delay * 2, max_delay_s)
+
+        raise last_error if last_error else DeviceNotOpenError("Reconnect failed")
+
+    def _daemon_cycle(
+        self, temp_key: str | None, test_mode: bool, poll_interval_s: float
+    ) -> None:
+        """Send one round of CPU (and optional temperature) values."""
+        # Send CPU usage, paced to at least `poll_interval_s` between updates
+        with TimeHelper(min_duration=poll_interval_s):
+            self.send_cpu(get_cpu_usage(test_mode), skip_unchanged=not test_mode)
+
+        # Get device temperature using the provided key
+        if temp_key:
+            with TimeHelper(min_duration=poll_interval_s):
+                self.send_temperature(
+                    get_device_temp(temp_key, test_mode),
+                    skip_unchanged=not test_mode,
+                )
+        elif test_mode:
+            self.send_temperature(get_device_temp("dummy_device", test_mode))
+            time.sleep(poll_interval_s)
+
     def start_daemon(
         self,
         temp_key: str | None,
         test_mode: bool,
         poll_interval_s: float = 1.6,
         *,
+        reconnect_attempts: int = 5,
+        reconnect_min_delay_s: float = 1.0,
+        reconnect_max_delay_s: float = 30.0,
         _max_cycles: int | None = None,
     ) -> None:
         """Start a daemon to update the CPU usage and optionally a temperature.
@@ -699,32 +761,43 @@ class EpomakerController:
         Values are only written when they change from the last sent value, so
         an idle machine does not emit a feature report every cycle.
 
+        The loop survives device hiccups (unplug, sleep, mode switch): a failed
+        send closes the HID handle and retries with exponential backoff. If the
+        keyboard cannot be reopened after ``reconnect_attempts`` tries, the last
+        error propagates so a supervisor (e.g. systemd ``Restart=on-failure``)
+        can restart the daemon.
+
         Args:
             temp_key (str): A label corresponding to the device to monitor.
             test_mode (bool): Send random ints instead of real values.
             poll_interval_s (float): Minimum seconds between display updates.
+            reconnect_attempts (int): Open attempts before giving up.
+            reconnect_min_delay_s (float): First backoff delay in seconds.
+            reconnect_max_delay_s (float): Cap for the exponential backoff.
+
+        Raises:
+            EpomakerError: If the device cannot be reopened after reconnecting.
+            KeyboardInterrupt: On SIGINT/SIGTERM (clean shutdown).
         """
         # Set current time and date
         self.send_time()
 
         cycles = 0
         while True:
-            # Send CPU usage, paced to at least `poll_interval_s` between updates
-            with TimeHelper(min_duration=poll_interval_s):
-                self.send_cpu(
-                    get_cpu_usage(test_mode), skip_unchanged=not test_mode
+            try:
+                self._daemon_cycle(temp_key, test_mode, poll_interval_s)
+            except (DeviceCommunicationError, DeviceNotOpenError, OSError) as e:
+                log.warning("Device error, reconnecting: %s", e)
+                self._reopen_with_backoff(
+                    reconnect_attempts,
+                    reconnect_min_delay_s,
+                    reconnect_max_delay_s,
                 )
-
-            # Get device temperature using the provided key
-            if temp_key:
-                with TimeHelper(min_duration=poll_interval_s):
-                    self.send_temperature(
-                        get_device_temp(temp_key, test_mode),
-                        skip_unchanged=not test_mode,
-                    )
-            elif test_mode:
-                self.send_temperature(get_device_temp("dummy_device", test_mode))
-                time.sleep(poll_interval_s)
+                # The screen lost its contents across the reconnect.
+                self._last_cpu = None
+                self._last_temperature = None
+                self.send_time()
+                continue
 
             cycles += 1
             if _max_cycles is not None and cycles >= _max_cycles:

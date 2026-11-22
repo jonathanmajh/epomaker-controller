@@ -209,7 +209,12 @@ def send_cpu(cpu: int) -> None:
 def start_daemon(
     temp_key: str | None, test_mode: bool, poll_interval: float
 ) -> None:
-    """Start a daemon to update the CPU usage and optionally a temperature."""
+    """Start a daemon to update the CPU usage and optionally a temperature.
+
+    Survives unplugging/sleeping the keyboard by reconnecting with backoff.
+    Exits non-zero if the device cannot be recovered, so a service manager
+    (systemd ``Restart=on-failure``) can restart it.
+    """
     try:
         with open_controller(install_signal_handlers=True) as controller:
             controller.start_daemon(
@@ -218,7 +223,8 @@ def start_daemon(
     except KeyboardInterrupt:
         click.echo("Daemon interrupted by user.")
     except Exception as e:
-        click.echo(f"Error in start-daemon: {e}")
+        click.echo(f"Error in start-daemon: {e}", err=True)
+        raise SystemExit(1) from e
 
 
 @cli.command()

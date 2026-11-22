@@ -17,7 +17,11 @@ from epomakercontroller.commands.data.constants import (
     PACKET_DELAY_S,
 )
 from epomakercontroller.epomakercontroller import EpomakerController
-from epomakercontroller.exceptions import ProtocolError, UnsupportedImageError
+from epomakercontroller.exceptions import (
+    DeviceNotOpenError,
+    ProtocolError,
+    UnsupportedImageError,
+)
 from epomakercontroller.utils.keyboard_keys import KeyboardKeys
 
 
@@ -180,3 +184,70 @@ def test_daemon_always_sends_in_test_mode(main_config) -> None:
     ctl = EpomakerController(main_config, dry_run=True)
     calls = _run_one_daemon_iteration(ctl, test_mode=True)
     assert [c["skip_unchanged"] for c in calls] == [False, False]
+
+
+def test_daemon_reconnects_after_device_error(main_config) -> None:
+    """A failed send closes the device, reopens it, and resumes the loop."""
+    from epomakercontroller.exceptions import DeviceCommunicationError
+
+    ctl = EpomakerController(main_config, dry_run=True)
+    events: list[str] = []
+    failures = {"n": 1}
+
+    def flaky_cpu(value: int, **kwargs: object) -> bool:
+        if failures["n"]:
+            failures["n"] -= 1
+            events.append("fail")
+            raise DeviceCommunicationError("cable yanked")
+        events.append("ok")
+        return True
+
+    ctl.send_cpu = flaky_cpu  # type: ignore[method-assign]
+    ctl.send_temperature = lambda *a, **k: True  # type: ignore[method-assign]
+    ctl.send_time = lambda *a, **k: events.append("time")  # type: ignore[method-assign]
+
+    opens = {"n": 0}
+    real_open = ctl.open_device
+
+    def counting_open(*a, **k) -> bool:
+        opens["n"] += 1
+        return real_open(*a, **k)
+
+    ctl.open_device = counting_open  # type: ignore[method-assign]
+
+    with patch("epomakercontroller.epomakercontroller.get_cpu_usage", return_value=7):
+        with patch(
+            "epomakercontroller.epomakercontroller.get_device_temp", return_value=30
+        ):
+            ctl.start_daemon(
+                "coretemp-0",
+                False,
+                poll_interval_s=0,
+                reconnect_min_delay_s=0,
+                _max_cycles=1,
+            )
+
+    assert events == ["time", "fail", "time", "ok"]
+    assert opens["n"] == 1  # one reopen after the failure
+
+
+def test_daemon_raises_when_reconnect_gives_up(main_config) -> None:
+    """If the keyboard never comes back, the error propagates to the caller."""
+    from epomakercontroller.exceptions import DeviceCommunicationError
+
+    ctl = EpomakerController(main_config, dry_run=True)
+
+    def always_fail(*a, **k):
+        raise DeviceCommunicationError("gone")
+
+    ctl.send_cpu = always_fail  # type: ignore[method-assign]
+
+    with patch.object(ctl, "open_device", side_effect=DeviceNotOpenError("nope")):
+        with pytest.raises(DeviceNotOpenError):
+            ctl.start_daemon(
+                None,
+                False,
+                poll_interval_s=0,
+                reconnect_attempts=2,
+                reconnect_min_delay_s=0,
+            )
