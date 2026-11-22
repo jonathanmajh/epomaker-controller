@@ -754,6 +754,7 @@ class EpomakerController:
         reconnect_attempts: int = 5,
         reconnect_min_delay_s: float = 1.0,
         reconnect_max_delay_s: float = 30.0,
+        clock_resync_s: float = 3600.0,
         _max_cycles: int | None = None,
     ) -> None:
         """Start a daemon to update the CPU usage and optionally a temperature.
@@ -774,6 +775,8 @@ class EpomakerController:
             reconnect_attempts (int): Open attempts before giving up.
             reconnect_min_delay_s (float): First backoff delay in seconds.
             reconnect_max_delay_s (float): Cap for the exponential backoff.
+            clock_resync_s (float): Re-send the clock this often (seconds), in
+                case the keyboard loses time across sleep or power loss.
 
         Raises:
             EpomakerError: If the device cannot be reopened after reconnecting.
@@ -781,9 +784,14 @@ class EpomakerController:
         """
         # Set current time and date
         self.send_time()
+        last_clock_sync = time.monotonic()
 
         cycles = 0
         while True:
+            if clock_resync_s and time.monotonic() - last_clock_sync >= clock_resync_s:
+                self.send_time()
+                last_clock_sync = time.monotonic()
+
             try:
                 self._daemon_cycle(temp_key, test_mode, poll_interval_s)
             except (DeviceCommunicationError, DeviceNotOpenError, OSError) as e:

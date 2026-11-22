@@ -251,3 +251,36 @@ def test_daemon_raises_when_reconnect_gives_up(main_config) -> None:
                 reconnect_attempts=2,
                 reconnect_min_delay_s=0,
             )
+
+
+def test_daemon_resends_clock_periodically(main_config) -> None:
+    """The clock is re-sent during the loop, not just once at startup."""
+    ctl = EpomakerController(main_config, dry_run=True)
+    times: list[object] = [1, 2, 3]
+    ctl.send_time = lambda *a, **k: times.append("sent")  # type: ignore[method-assign]
+    ctl.send_cpu = lambda *a, **k: True  # type: ignore[method-assign]
+    ctl.send_temperature = lambda *a, **k: True  # type: ignore[method-assign]
+
+    with patch("epomakercontroller.epomakercontroller.get_cpu_usage", return_value=7):
+        ctl.start_daemon(
+            None,
+            False,
+            poll_interval_s=0,
+            clock_resync_s=1e-9,
+            _max_cycles=2,
+        )
+
+    # One send at startup, then one before each of the two cycles.
+    assert times.count("sent") == 3
+
+
+def test_daemon_clock_resync_can_be_disabled(main_config) -> None:
+    ctl = EpomakerController(main_config, dry_run=True)
+    times: list[object] = [1, 2, 3]
+    ctl.send_time = lambda *a, **k: times.append("sent")  # type: ignore[method-assign]
+    ctl.send_cpu = lambda *a, **k: True  # type: ignore[method-assign]
+
+    with patch("epomakercontroller.epomakercontroller.get_cpu_usage", return_value=7):
+        ctl.start_daemon(None, False, poll_interval_s=0, clock_resync_s=0, _max_cycles=3)
+
+    assert times.count("sent") == 1
