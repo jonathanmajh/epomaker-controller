@@ -4,6 +4,8 @@ from unittest.mock import patch
 
 import pytest
 
+import pytest
+
 from epomakercontroller.commands.EpomakerKeyRGBCommand import (
     KeyboardRGBFrame,
     KeyMap,
@@ -115,3 +117,66 @@ def test_signal_handlers_opt_in(main_config, monkeypatch) -> None:
         main_config, dry_run=True, install_signal_handlers=True
     )
     assert len(calls) == 2  # SIGINT + SIGTERM
+
+
+def test_send_cpu_skips_unchanged(main_config) -> None:
+    ctl = EpomakerController(main_config, dry_run=True)
+    sent: list[object] = []
+    ctl._send_command = lambda cmd, **kw: sent.append(cmd)  # type: ignore[method-assign]
+
+    assert ctl.send_cpu(10) is True
+    assert ctl.send_cpu(10, skip_unchanged=True) is False
+    assert ctl.send_cpu(11, skip_unchanged=True) is True
+    assert ctl.send_cpu(10) is True  # opt-in: unchanged value still sent
+    assert len(sent) == 3
+
+
+def test_send_temperature_skips_unchanged(main_config) -> None:
+    ctl = EpomakerController(main_config, dry_run=True)
+    sent: list[object] = []
+    ctl._send_command = lambda cmd, **kw: sent.append(cmd)  # type: ignore[method-assign]
+
+    assert ctl.send_temperature(40) is True
+    assert ctl.send_temperature(40, skip_unchanged=True) is False
+    assert ctl.send_temperature(None) is False
+    assert len(sent) == 1
+
+
+def _run_one_daemon_iteration(ctl, test_mode: bool) -> list[dict]:
+    """Run start_daemon for a single cycle and return the calls it made."""
+    calls: list[dict] = []
+
+    def fake_cpu(value: int, **kwargs: object) -> bool:
+        calls.append({"kind": "cpu", "value": value, **kwargs})
+        return True
+
+    def fake_temp(value: int, **kwargs: object) -> bool:
+        calls.append({"kind": "temp", "value": value, **kwargs})
+        return True
+
+    ctl.send_cpu = fake_cpu  # type: ignore[method-assign]
+    ctl.send_temperature = fake_temp  # type: ignore[method-assign]
+
+    with patch("epomakercontroller.epomakercontroller.get_cpu_usage", return_value=5):
+        with patch(
+            "epomakercontroller.epomakercontroller.get_device_temp", return_value=30
+        ):
+            ctl.start_daemon(
+                "coretemp-0", test_mode, poll_interval_s=0, _max_cycles=1
+            )
+    return calls
+
+
+def test_daemon_skips_unchanged_for_real_values(main_config) -> None:
+    """Values that haven't changed are not re-sent to the keyboard."""
+    ctl = EpomakerController(main_config, dry_run=True)
+    calls = _run_one_daemon_iteration(ctl, test_mode=False)
+    assert calls[0] == {"kind": "cpu", "value": 5, "skip_unchanged": True}
+    assert calls[1] == {"kind": "temp", "value": 30, "skip_unchanged": True}
+
+
+def test_daemon_always_sends_in_test_mode(main_config) -> None:
+    """Test mode sends random data every cycle, so nothing is skipped."""
+    ctl = EpomakerController(main_config, dry_run=True)
+    calls = _run_one_daemon_iteration(ctl, test_mode=True)
+    assert [c["skip_unchanged"] for c in calls] == [False, False]

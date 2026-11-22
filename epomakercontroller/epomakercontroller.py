@@ -111,6 +111,10 @@ class EpomakerController:
         self.lock = threading.RLock()
         self.dry_run = dry_run
         self.device_list: list[dict[str, Any]] = []
+        # Last values pushed to the screen, so the daemon can skip redundant
+        # feature reports. None means "nothing sent yet".
+        self._last_cpu: int | None = None
+        self._last_temperature: int | None = None
         print(
             """WARNING: If this program errors out or you cancel early, the keyboard
               may become unresponsive. It should work fine again if you unplug and plug
@@ -571,41 +575,57 @@ class EpomakerController:
         time_command = EpomakerTimeCommand.EpomakerTimeCommand(time)
         self._send_command(time_command)
 
-    def send_temperature(self, temperature: int | None) -> None:
+    def send_temperature(
+        self, temperature: int | None, *, skip_unchanged: bool = False
+    ) -> bool:
         """Sends the temperature to the HID device.
 
         Args:
             temperature (int): The temperature value in C (0-99).
-            delay_seconds (int): Time waited after command is sent.
+            skip_unchanged (bool): Return False instead of resending when the
+                value equals the last one written.
+
+        Returns:
+            bool: True if a report was written, False if skipped.
 
         Raises:
             ValueError: If the temperature is not in the range 0-99.
         """
         if temperature is None:
             # Don't send anything if no temperature was provided (0 °C is valid)
-            return
+            return False
         if not self._assert_range(temperature):
             raise ValueError(f"Temperature must be in range 0-99: {temperature}")
+        if skip_unchanged and temperature == self._last_temperature:
+            return False
         temperature_command = EpomakerTempCommand.EpomakerTempCommand(temperature)
         log.debug("Sending temperature %sC", temperature)
         self._send_command(temperature_command)
+        self._last_temperature = temperature
+        return True
 
-    def send_cpu(self, cpu: int) -> None:
+    def send_cpu(self, cpu: int, *, skip_unchanged: bool = False) -> bool:
         """Sends the CPU percentage to the HID device.
 
         Args:
             cpu (int): The CPU percentage to send.
-            delay_seconds (int): Time waited after command is sent.
+
+        Returns:
+            bool: True if a report was written, False if the value was rejected
+                as unchanged and ``skip_unchanged`` is set.
 
         Raises:
-            ValueError: If the CPU percentage is not in the range 0-100 and
-                from_daemon is False.
+            ValueError: If the CPU percentage is not in the range 0-100.
         """
         if not self._assert_range(cpu, range(0, 101)):
             raise ValueError("CPU percentage must be in range 0-100")
+        if skip_unchanged and cpu == self._last_cpu:
+            return False
         cpu_command = EpomakerCpuCommand.EpomakerCpuCommand(cpu)
         log.debug("Sending CPU %s%%", cpu)
         self._send_command(cpu_command)
+        self._last_cpu = cpu
+        return True
 
     def set_rgb_all_keys(self, r: int, g: int, b: int) -> None:
         # Make sure values are within range
@@ -666,28 +686,49 @@ class EpomakerController:
         profile_command = EpomakerProfileCommand.EpomakerProfileCommand(profile)
         self._send_command(profile_command)
 
-    def start_daemon(self, temp_key: str | None, test_mode: bool) -> None:
+    def start_daemon(
+        self,
+        temp_key: str | None,
+        test_mode: bool,
+        poll_interval_s: float = 1.6,
+        *,
+        _max_cycles: int | None = None,
+    ) -> None:
         """Start a daemon to update the CPU usage and optionally a temperature.
+
+        Values are only written when they change from the last sent value, so
+        an idle machine does not emit a feature report every cycle.
 
         Args:
             temp_key (str): A label corresponding to the device to monitor.
             test_mode (bool): Send random ints instead of real values.
+            poll_interval_s (float): Minimum seconds between display updates.
         """
         # Set current time and date
         self.send_time()
 
+        cycles = 0
         while True:
-            # Send CPU usage, paced to at least 1.6s between updates
-            with TimeHelper(min_duration=1.6):
-                self.send_cpu(get_cpu_usage(test_mode))
+            # Send CPU usage, paced to at least `poll_interval_s` between updates
+            with TimeHelper(min_duration=poll_interval_s):
+                self.send_cpu(
+                    get_cpu_usage(test_mode), skip_unchanged=not test_mode
+                )
 
             # Get device temperature using the provided key
             if temp_key:
-                with TimeHelper(min_duration=1.6):
-                    self.send_temperature(get_device_temp(temp_key, test_mode))
+                with TimeHelper(min_duration=poll_interval_s):
+                    self.send_temperature(
+                        get_device_temp(temp_key, test_mode),
+                        skip_unchanged=not test_mode,
+                    )
             elif test_mode:
                 self.send_temperature(get_device_temp("dummy_device", test_mode))
-                time.sleep(1.6)
+                time.sleep(poll_interval_s)
+
+            cycles += 1
+            if _max_cycles is not None and cycles >= _max_cycles:
+                return
 
     def close_device(self) -> None:
         """Closes the USB HID device."""

@@ -197,12 +197,24 @@ def send_cpu(cpu: int) -> None:
     is_flag=True,
     help="Start daemon in test mode, sending random data.",
 )
+@click.option(
+    "--interval",
+    "poll_interval",
+    default=1.6,
+    show_default=True,
+    type=float,
+    help="Minimum seconds between display updates.",
+)
 @click.argument("temp_key", type=str, required=False)
-def start_daemon(temp_key: str | None, test_mode: bool) -> None:
+def start_daemon(
+    temp_key: str | None, test_mode: bool, poll_interval: float
+) -> None:
     """Start a daemon to update the CPU usage and optionally a temperature."""
     try:
         with open_controller(install_signal_handlers=True) as controller:
-            controller.start_daemon(temp_key, test_mode)
+            controller.start_daemon(
+                temp_key, test_mode, poll_interval_s=poll_interval
+            )
     except KeyboardInterrupt:
         click.echo("Daemon interrupted by user.")
     except Exception as e:
