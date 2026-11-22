@@ -50,3 +50,12 @@ def test_send_time_uses_open_controller(main_config, monkeypatch) -> None:
     mock_ctl.send_time.assert_called_once()
     mock_ctl.close_device.assert_called()
     assert "Time sent successfully" in result.output
+
+
+def test_start_daemon_interval_lower_bound(main_config, monkeypatch) -> None:
+    """--interval below the hardware limit is rejected."""
+    monkeypatch.setattr("epomakercontroller.cli.CONFIG_MAIN", main_config)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["start-daemon", "--interval", "0.2"])
+    assert result.exit_code != 0
+    assert "1.6" in result.output

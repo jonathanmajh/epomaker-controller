@@ -202,8 +202,8 @@ def send_cpu(cpu: int) -> None:
     "poll_interval",
     default=1.6,
     show_default=True,
-    type=float,
-    help="Minimum seconds between display updates.",
+    type=click.FloatRange(min=1.6),
+    help="Minimum seconds between display updates (hardware limit: 1.6).",
 )
 @click.argument("temp_key", type=str, required=False)
 def start_daemon(
