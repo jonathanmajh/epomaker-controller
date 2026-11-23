@@ -151,9 +151,12 @@ def test_server_streams_upload_progress(running_server, runtime_dir, main_config
         )
     finally:
         backend.close()
-    assert stages[0] == "erasing"
+    assert stages[0] == "uploading"
     assert "uploading" in stages
     assert stages[-1] == "done"
+    # Live uploads must not use the legacy flash/reboot stages.
+    assert "flashing" not in stages
+    assert "applying" not in stages
 
 
 def test_server_second_instance_exits(running_server, runtime_dir) -> None:

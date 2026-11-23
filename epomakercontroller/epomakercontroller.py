@@ -558,28 +558,98 @@ class EpomakerController:
             if dev0 is not None:
                 dev0.close()
 
+    def _send_dynatab_live_command(
+        self,
+        screen_command: EpomakerDynaTabScreenCommand,
+        *,
+        progress: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
+        """Send a DynaTab screen command over iface 1 without flashing.
+
+        This mirrors the official Epomaker app: the ``0xA9`` prep report and
+        the ``0x29`` data reports go to the vendor configuration interface,
+        with no iface-0 apply and no reboot. The screen updates live and
+        typing is not interrupted.
+        """
+        if self.dry_run:
+            if progress:
+                progress({"stage": "uploading", "sent": 0, "total": 0})
+                progress({"stage": "done"})
+            return
+
+        reports = list(screen_command)
+        if not reports:
+            return
+
+        dev = self.device if self._opened and self.device is not None else None
+        close_after = False
+        if dev is None:
+            path = self._find_interface_path(1)
+            if not path:
+                raise DeviceNotOpenError(
+                    "Interface 1 not found for live screen upload."
+                )
+            dev = hid.device()
+            dev.open_path(path)
+            close_after = True
+
+        total = len(reports) - 1
+        try:
+            with self.lock:
+                if progress:
+                    progress({"stage": "uploading", "sent": 0, "total": total})
+                dev.send_feature_report(bytes(reports[0].get_all_bytes()))
+                time.sleep(ERASE_DELAY_S)
+                for index, packet in enumerate(reports[1:], start=1):
+                    dev.send_feature_report(bytes(packet.get_all_bytes()))
+                    time.sleep(PACKET_DELAY_S)
+                    if progress and (index == total or index % 5 == 0):
+                        progress(
+                            {
+                                "stage": "uploading",
+                                "sent": index,
+                                "total": total,
+                            }
+                        )
+                if progress:
+                    progress({"stage": "done"})
+        finally:
+            if close_after:
+                dev.close()
+
     def send_dynatab_frames(
         self,
         frames_rgb: list[list[tuple[int, int, int]]],
         delay_ms: int = 100,
         *,
+        flash: bool = False,
         progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         """Send pixel frames directly to the DynaTab 75X screen (no image file).
 
+        By default the frames are sent live over iface 1, the same path the
+        official app uses: no 12 s flash wait and no iface-0 apply, so typing
+        is not interrupted. Pass ``flash=True`` for the legacy flash-and-reboot
+        path.
+
         Args:
             frames_rgb: Column-major RGB frames (60×9 = 540 pixels each).
             delay_ms: Animation frame delay in milliseconds.
+            flash: Write to flash and reboot instead of updating live.
             progress: Optional callback receiving upload stage dictionaries.
         """
         screen_command = EpomakerDynaTabScreenCommand(frames_rgb, delay_ms)
-        self._upload_dynatab_command(screen_command, progress=progress)
+        if flash:
+            self._upload_dynatab_command(screen_command, progress=progress)
+        else:
+            self._send_dynatab_live_command(screen_command, progress=progress)
 
     def send_dynatab_screen(
         self,
         image_path: str,
         delay_ms: int = 100,
         *,
+        flash: bool = False,
         progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         """Sends an image or GIF to the DynaTab 75X screen.
@@ -587,18 +657,23 @@ class EpomakerController:
         Args:
             image_path (str): The path to the image/GIF file.
             delay_ms (int): The animation frame delay in milliseconds (default: 100).
+            flash: Write to flash and reboot instead of updating live.
             progress: Optional callback receiving upload stage dictionaries.
         """
         screen_command = EpomakerDynaTabScreenCommand.from_image(
             image_path, delay_ms
         )
-        self._upload_dynatab_command(screen_command, progress=progress)
+        if flash:
+            self._upload_dynatab_command(screen_command, progress=progress)
+        else:
+            self._send_dynatab_live_command(screen_command, progress=progress)
 
     def send_image(
         self,
         image_path: str,
         delay_ms: int = 100,
         *,
+        flash: bool = False,
         progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         """Sends an image or GIF to the HID device.
@@ -606,17 +681,25 @@ class EpomakerController:
         Args:
             image_path (str): The path to the image file.
             delay_ms (int): The animation frame delay in milliseconds (default: 100).
+            flash: Write to flash and reboot instead of updating live.
             progress: Optional callback receiving upload stage dictionaries.
         """
         if self.has_capability(CAPABILITY_DYNATAB_SCREEN):
-            was_open = self.is_open
-            if was_open:
-                self.close_device()
-
-            self.send_dynatab_screen(image_path, delay_ms, progress=progress)
-
-            if was_open:
-                self.open_device()
+            if flash:
+                was_open = self.is_open
+                if was_open:
+                    self.close_device()
+                try:
+                    self.send_dynatab_screen(
+                        image_path, delay_ms, flash=True, progress=progress
+                    )
+                finally:
+                    if was_open:
+                        self.open_device()
+            else:
+                self.send_dynatab_screen(
+                    image_path, delay_ms, flash=False, progress=progress
+                )
             return
 
         if not self.has_capability(CAPABILITY_RT100_SCREEN):

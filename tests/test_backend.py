@@ -6,6 +6,7 @@ import socket
 import threading
 import time
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -43,6 +44,14 @@ def test_direct_backend_dry_run(main_config) -> None:
     backend.send_cpu(10)
     backend.close()
     assert backend.connected is False
+
+
+def test_direct_backend_passes_flash(main_config) -> None:
+    backend = DirectBackend(main_config, dry_run=True)
+    backend.controller = MagicMock()
+    backend.send_dynatab_frames([[(0, 0, 0)] * 540], flash=True)
+    backend.controller.send_dynatab_frames.assert_called_once()
+    assert backend.controller.send_dynatab_frames.call_args.kwargs["flash"] is True
 
 
 def test_connect_backend_without_daemon_raises(main_config, runtime_dir) -> None:

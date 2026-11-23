@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
@@ -16,6 +17,7 @@ from .daemon import run_daemon
 from .configs.configs import load_main_config
 from .epomakercontroller import EpomakerController
 from .exceptions import DeviceNotOpenError, EpomakerError
+from .utils.bitmap_text import render_text_frame
 from .utils.sensors import print_temp_devices
 from .utils.keyboard_gui import RGBKeyboardGUI
 
@@ -111,20 +113,105 @@ def cli(ctx: click.Context, direct: bool) -> None:
     type=int,
     help="Frame delay in milliseconds (for animations/GIFs).",
 )
-def upload_image(image_path: str, delay: int) -> None:
-    """Upload an image or GIF to the Epomaker device."""
+@click.option(
+    "--flash",
+    is_flag=True,
+    help=(
+        "Write to flash and reboot (slow, blocks input) instead of "
+        "updating live."
+    ),
+)
+def upload_image(image_path: str, delay: int, flash: bool) -> None:
+    """Upload an image or GIF to the Epomaker device (live by default)."""
 
     def _action(controller: EpomakerController) -> None:
-        print(
-            "Uploading, you should see the status on the keyboard screen.\n"
-            "The keyboard will be unresponsive during this process."
-        )
-        controller.send_image(image_path, delay_ms=delay)
+        if flash:
+            print(
+                "Uploading to flash; the keyboard will be unresponsive "
+                "during this process."
+            )
+        else:
+            print(
+                "Uploading; the screen updates live and typing is not "
+                "interrupted."
+            )
+        controller.send_image(image_path, delay_ms=delay, flash=flash)
 
     _run_with_device(
         _action,
         success="Image uploaded successfully.",
         error_prefix="Failed to upload image",
+    )
+
+
+def _parse_color(value: str) -> tuple[int, int, int]:
+    try:
+        parts = [int(part.strip()) for part in value.split(",")]
+    except ValueError as error:
+        raise click.BadParameter("colour must be r,g,b integers") from error
+    if len(parts) != 3 or any(not 0 <= part <= 255 for part in parts):
+        raise click.BadParameter("colour must be three integers in 0..255")
+    return parts[0], parts[1], parts[2]
+
+
+@cli.command()
+@click.argument("text")
+@click.option(
+    "--color",
+    default="0,220,120",
+    show_default=True,
+    help="Text colour as r,g,b (0-255).",
+)
+@click.option(
+    "--flash",
+    is_flag=True,
+    help=(
+        "Write to flash and reboot (slow, blocks input) instead of "
+        "updating live."
+    ),
+)
+def screen_text(text: str, color: str, flash: bool) -> None:
+    """Show text on the DynaTab 75X screen (live by default)."""
+    rgb = _parse_color(color)
+
+    def _action(controller: EpomakerController) -> None:
+        frames = [render_text_frame(text, color=rgb, y=1)]
+        controller.send_dynatab_frames(frames, delay_ms=1, flash=flash)
+
+    _run_with_device(
+        _action,
+        success=f"Text sent: {text!r}",
+        error_prefix="Failed to send text",
+    )
+
+
+@cli.command()
+@click.option(
+    "--color",
+    default="0,220,120",
+    show_default=True,
+    help="Text colour as r,g,b (0-255).",
+)
+@click.option(
+    "--flash",
+    is_flag=True,
+    help="Write each line to flash and reboot (slow, blocks input).",
+)
+def screen_watch(color: str, flash: bool) -> None:
+    """Show stdin lines on the DynaTab 75X screen, one per line."""
+    rgb = _parse_color(color)
+
+    def _action(controller: EpomakerController) -> None:
+        for line in sys.stdin:
+            text = line.rstrip("\n")
+            frames = [render_text_frame(text, color=rgb, y=1)]
+            controller.send_dynatab_frames(frames, delay_ms=1, flash=flash)
+            print(f"sent {text!r}", flush=True)
+
+    _run_with_device(
+        _action,
+        success="Screen watch finished.",
+        error_prefix="Failed to update screen",
     )
 
 

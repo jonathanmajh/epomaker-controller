@@ -137,6 +137,7 @@ class Backend:
         frames_rgb: list[list[tuple[int, int, int]]],
         delay_ms: int = 100,
         *,
+        flash: bool = False,
         progress: Any = None,
     ) -> None:
         raise NotImplementedError
@@ -146,6 +147,7 @@ class Backend:
         image_path: str,
         delay_ms: int = 100,
         *,
+        flash: bool = False,
         progress: Any = None,
     ) -> None:
         raise NotImplementedError
@@ -225,10 +227,11 @@ class DirectBackend(Backend):
         frames_rgb: list[list[tuple[int, int, int]]],
         delay_ms: int = 100,
         *,
+        flash: bool = False,
         progress: Any = None,
     ) -> None:
         self.controller.send_dynatab_frames(
-            frames_rgb, delay_ms=delay_ms, progress=progress
+            frames_rgb, delay_ms=delay_ms, flash=flash, progress=progress
         )
 
     def send_image(
@@ -236,10 +239,11 @@ class DirectBackend(Backend):
         image_path: str,
         delay_ms: int = 100,
         *,
+        flash: bool = False,
         progress: Any = None,
     ) -> None:
         self.controller.send_image(
-            image_path, delay_ms=delay_ms, progress=progress
+            image_path, delay_ms=delay_ms, flash=flash, progress=progress
         )
 
 
@@ -389,6 +393,7 @@ class SocketBackend(Backend):
         frames_rgb: list[list[tuple[int, int, int]]],
         delay_ms: int = 100,
         *,
+        flash: bool = False,
         progress: Any = None,
     ) -> None:
         frames = [
@@ -396,7 +401,7 @@ class SocketBackend(Backend):
         ]
         self._request(
             "upload_screen",
-            {"frames": frames, "delay_ms": delay_ms},
+            {"frames": frames, "delay_ms": delay_ms, "flash": flash},
             progress=progress,
         )
 
@@ -405,12 +410,13 @@ class SocketBackend(Backend):
         image_path: str,
         delay_ms: int = 100,
         *,
+        flash: bool = False,
         progress: Any = None,
     ) -> None:
         path = Path(image_path).expanduser().resolve()
         self._request(
             "upload_image",
-            {"path": str(path), "delay_ms": delay_ms},
+            {"path": str(path), "delay_ms": delay_ms, "flash": flash},
             progress=progress,
         )
 

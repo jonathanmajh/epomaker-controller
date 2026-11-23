@@ -2,7 +2,7 @@
 
 Branch: `reverse-engineer-arbitrary-text` (off `main` @ `b5c9fd6`)
 Date: 2026-11-22
-Status: proof-of-concept confirmed; implementation not yet added
+Status: live text confirmed and implemented (iface-1 path)
 
 ## Objective
 
@@ -128,20 +128,35 @@ Sent three frames with different iface-0 commits and monitored `input25`:
 Conclusion: either single iface-0 write is enough to commit a new frame.
 Using one write halves the input dropout to roughly **0.38 s** per update.
 
+### 7. App-path live updates (iface 1)
+
+With the host Epomaker service stopped (it was holding iface 1), sent five
+consecutive frames `LIVE1`..`LIVE5` over iface 1 using the app's exact
+`0xA9` + `0x29` layout, with no iface-0 write:
+
+- All five frames appeared in order.
+- Holding Enter produced no interruptions.
+- `input25` never disappeared; the USB device never re-enumerated.
+- Input gaps: **none**.
+
+This is the path to use for live text; the legacy iface-2 + iface-0 path is
+only needed for `flash=True`.
+
 ## Results / conclusions
 
-- Live screen updates are possible without the 12 s flash/reboot.
-- The screen is updated by iface-2 `0xa9` + `0x29` packets, then committed by
-  one iface-0 write (`00 00` or `00 01`).
-- Each commit removes the main keyboard input device for ~0.37–0.39 s.
-- The USB device does not re-enumerate; only the HID input interface resets.
-- Practical update-rate trade-off:
-  - 5 s interval → ~8% input downtime
-  - 1.6 s interval → ~24% input downtime
-  - screen text is best for slow-changing content
-- Arbitrary static text is already possible via
-  `bitmap_text.render_text_frame()` + the existing screen upload path.
-  The new piece is the single-commit live path.
+- **Live screen updates work with no input dropout** via the app's iface-1
+  path (`0xA9` prep + `0x29` data, no iface-0 write). Verified 2026-11-23:
+  five consecutive frames (`LIVE1`..`LIVE5`) all appeared, and holding Enter
+  had no interruptions. `input25` never went away and the USB device never
+  re-enumerated.
+- The legacy iface-2 + iface-0 path (12 s flash wait + `00 00`/`00 01`
+  apply) does work, but each commit removes the main input device for
+  ~0.37–0.39 s. It is now only used with `flash=True`.
+- The app's own screen upload path is iface 1: `getTFTLCDDataRGBImg`
+  (`0xA9`) then `setTFTLCDDataRGBImg` (`0x29`, 8-byte header + 56 bytes,
+  ~5–10 ms apart), with no iface-0 write. The main MCU drives the screen.
+- Arbitrary text is rendered host-side (`bitmap_text.render_text_frame`) and
+  sent as a 60×9 RGB frame; no firmware text widget is needed.
 
 ## Official firmware / app investigation (2026-11-23)
 
@@ -214,27 +229,40 @@ The desktop app proxies HID through `iot_manager_rs.exe`, a gRPC-Web service on
   live-update typing freeze, but that is a separate firmware-modification
   project.
 
+## Implementation (2026-11-23)
+
+- `EpomakerController._send_dynatab_live_command()` sends the `0xA9` prep and
+  `0x29` data reports over iface 1 under `self.lock`; no iface-0 write and no
+  reboot. `send_dynatab_frames(..., flash=False)` is the new default;
+  `flash=True` keeps the legacy iface-2 + iface-0 path.
+- New CLI: `epomakercontroller screen-text "TEXT" [--color r,g,b] [--flash]`
+  and `screen-watch` (stdin lines). `upload-image` is live by default with an
+  opt-in `--flash`.
+- Daemon `upload_screen` / `upload_image` accept `flash` (default false).
+  Live uploads keep the HID handle open and do not close/reconnect.
+- Tests: 103 pass, including iface-1 report shape, no iface-0 write,
+  `flash=True` routing, CLI text/watch, and daemon progress stages.
+
 ## Open questions
 
-- Which single commit is more robust for consecutive updates (`00 00` vs
-  `00 01`)? Both worked once; a repeated-update test is still needed.
-- Is there an iface-2-only refresh that avoids the iface-0 input reset?
-- Does iface 1 accept a text/string opcode? Not investigated yet.
-- A USB capture of the official Epomaker app showing text would reveal the
-  native protocol and may avoid the iface-0 commit entirely.
+- Does the firmware have a native text/string widget? No evidence; the screen
+  path takes RGB frames, so text is rendered host-side. A native widget would
+  require a firmware patch.
 - Behaviour in 2.4 GHz wireless mode is untested.
 - Does the bootloader expose a read/verify command to dump the device flash and
   compare it with the official image (per-device calibration data)?
-- Can the main firmware be patched to skip the iface-0 input reset, and will the
-  bootloader accept a modified image with a recomputed `sum32`?
+- Can the main firmware be patched to add a native text widget (or change the
+  commit behaviour), and will the bootloader accept a modified image with a
+  recomputed `sum32`?
 
 ## Next steps
 
-1. Add `EpomakerController.send_dynatab_live_frame()` using a single iface-0
-   commit, no 12 s wait.
-2. Verify two consecutive updates with the same commit.
-3. Add CLI `epomakercontroller screen-text "..."` (+ `--color`) and optionally
-   `screen-watch` reading stdin lines.
-4. Probe iface-2-only refresh commands to eliminate the input dropout.
+1. ~~Add `EpomakerController.send_dynatab_live_frame()`~~ Done:
+   `_send_dynatab_live_command()` + `send_dynatab_frames(flash=False)`.
+2. ~~Verify two consecutive updates~~ Done: `LIVE1`..`LIVE5` all appeared,
+   zero input gaps.
+3. ~~Add CLI `screen-text` / `screen-watch`~~ Done, with `--color` and
+   `--flash`.
+4. ~~Probe iface-2-only refresh~~ Superseded by the iface-1 live path.
 5. Optionally implement a read-only bootloader probe (device ID/version) and a
    Python flasher for custom firmware using the protocol above.

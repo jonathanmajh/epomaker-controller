@@ -164,3 +164,34 @@ def test_open_controller_connect_false_does_not_open(main_config, monkeypatch) -
             pass
 
     mock_ctl.open_device.assert_not_called()
+
+
+def test_screen_text_uses_backend(main_config, monkeypatch) -> None:
+    monkeypatch.setattr("epomakercontroller.cli.CONFIG_MAIN", main_config)
+    backend = MagicMock()
+
+    with patch("epomakercontroller.cli.connect_backend", return_value=backend):
+        result = CliRunner().invoke(
+            cli, ["screen-text", "HELLO", "--color", "255,0,0"]
+        )
+
+    assert result.exit_code == 0, result.output
+    backend.send_dynatab_frames.assert_called_once()
+    args, kwargs = backend.send_dynatab_frames.call_args
+    frames = args[0]
+    assert len(frames) == 1
+    assert len(frames[0]) == 540
+    assert kwargs["flash"] is False
+    assert "Text sent" in result.output
+
+
+def test_screen_watch_reads_stdin(main_config, monkeypatch) -> None:
+    monkeypatch.setattr("epomakercontroller.cli.CONFIG_MAIN", main_config)
+    backend = MagicMock()
+
+    with patch("epomakercontroller.cli.connect_backend", return_value=backend):
+        result = CliRunner().invoke(cli, ["screen-watch"], input="ONE\nTWO\n")
+
+    assert result.exit_code == 0, result.output
+    assert backend.send_dynatab_frames.call_count == 2
+    assert "Screen watch finished" in result.output

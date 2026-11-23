@@ -81,6 +81,12 @@ def _as_int(value: Any, name: str, *, minimum: int = 0, maximum: int | None = No
     return value
 
 
+def _as_bool(value: Any, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ProtocolError(f"{name} must be a boolean")
+    return value
+
+
 def _validate_rgb(value: Any, name: str = "rgb") -> tuple[int, int, int]:
     if not isinstance(value, (list, tuple)) or len(value) != 3:
         raise ProtocolError(f"{name} must be a list of three integers")
@@ -161,11 +167,13 @@ def validate_request(command: str, args: dict[str, Any]) -> None:
     elif command == "upload_screen":
         _validate_screen_frames(args.get("frames"))
         _as_int(args.get("delay_ms", 100), "delay_ms", maximum=255)
+        _as_bool(args.get("flash", False), "flash")
     elif command == "upload_image":
         path = args.get("path")
         if not isinstance(path, str) or not path:
             raise ProtocolError("path must be a non-empty string")
         _as_int(args.get("delay_ms", 100), "delay_ms", maximum=255)
+        _as_bool(args.get("flash", False), "flash")
     elif command == "set_profile":
         try:
             Profile.Mode(args.get("mode"))
@@ -496,6 +504,7 @@ class DeviceWorker:
             c.send_image(
                 args["path"],
                 delay_ms=args.get("delay_ms", 100),
+                flash=_as_bool(args.get("flash", False), "flash"),
                 progress=job.progress,
             )
             return None
@@ -535,15 +544,21 @@ class DeviceWorker:
     def _upload_screen(self, job: Job) -> dict[str, Any]:
         frames = _validate_screen_frames(job.args["frames"])
         delay_ms = job.args.get("delay_ms", 100)
-        self._close_device()
-        with self._state_lock:
-            self._connected = False
+        flash = _as_bool(job.args.get("flash", False), "flash")
+        if flash:
+            self._close_device()
+            with self._state_lock:
+                self._connected = False
         try:
             self._controller.send_dynatab_frames(
-                frames, delay_ms=delay_ms, progress=job.progress
+                frames,
+                delay_ms=delay_ms,
+                flash=flash,
+                progress=job.progress,
             )
         finally:
-            self._reconnect_after_upload()
+            if flash:
+                self._reconnect_after_upload()
         return {"uploaded": True, "connected": self.connected}
 
     def _reconnect_after_upload(self) -> None:

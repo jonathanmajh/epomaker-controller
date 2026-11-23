@@ -64,6 +64,50 @@ def test_send_dynatab_frames_dry_run(dynatab_main_config) -> None:
     ctl.send_dynatab_frames([[(0, 0, 0)] * 540], delay_ms=80)
 
 
+def test_send_dynatab_frames_uses_iface1_live(dynatab_main_config) -> None:
+    ctl = EpomakerController(dynatab_main_config)
+    sent: list[bytes] = []
+    writes: list[bytes] = []
+
+    class FakeDevice:
+        def send_feature_report(self, data) -> None:
+            sent.append(bytes(data))
+
+        def write(self, data) -> None:
+            writes.append(bytes(data))
+
+        def close(self) -> None:
+            pass
+
+    ctl._opened = True
+    ctl.device = FakeDevice()
+
+    with patch("epomakercontroller.epomakercontroller.time.sleep"):
+        ctl.send_dynatab_frames([[(0, 0, 0)] * 540], delay_ms=1)
+
+    # 1 init (0xA9) + 29 data (0x29) reports, all 64 bytes.
+    assert len(sent) == 30
+    assert all(len(report) == 64 for report in sent)
+    assert sent[0][0] == 0xA9
+    assert all(report[0] == 0x29 for report in sent[1:])
+    # The live path must never write to iface 0.
+    assert writes == []
+
+
+def test_send_dynatab_frames_flash_uses_legacy_path(
+    dynatab_main_config, monkeypatch
+) -> None:
+    ctl = EpomakerController(dynatab_main_config)
+    calls = []
+    monkeypatch.setattr(
+        ctl,
+        "_upload_dynatab_command",
+        lambda command, progress=None: calls.append(command),
+    )
+    ctl.send_dynatab_frames([[(0, 0, 0)] * 540], delay_ms=1, flash=True)
+    assert len(calls) == 1
+
+
 def test_send_image_no_capability_raises(main_config) -> None:
     data = dict(main_config.data)
     data["CAPABILITIES"] = ["per_key_rgb"]  # no screen
