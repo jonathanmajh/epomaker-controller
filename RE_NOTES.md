@@ -143,6 +143,77 @@ Using one write halves the input dropout to roughly **0.38 s** per update.
   `bitmap_text.render_text_frame()` + the existing screen upload path.
   The new piece is the single-commit live path.
 
+## Official firmware / app investigation (2026-11-23)
+
+The Epomaker app is **EPOMAKER Driver v4** (Electron, v3.2.31). I downloaded the
+official Windows package
+`https://orders.epomaker.com/software/EPOMAKER_v4_setup_3.2.31_WIN2026109.zip`,
+extracted the NSIS installer and `app-32.7z`, and read the update code. It was
+not run with USB (Windows-only; container is Linux), but the download/flash
+logic is fully visible in `resources/app/dist/js/index.e985458e.js`.
+
+### Firmware download API
+
+`POST https://api2.rongyuan.tech:3816/api/v2/get_fw_version`
+body `{"dev_id":1723}` (DynaTab 75X model id; VID 0x3151 / PID 0x4015):
+
+```json
+{"code":0,"data":{
+  "dev_id":1723,
+  "version_str":"v102_oledv103",
+  "lowest_app_version_str":"1.2.65",
+  "file_path":"fw_upgrade_file/1723_v102_oledv103"
+}}
+```
+
+File: `GET https://api2.rongyuan.tech:3816/download/fw_upgrade_file/1723_v102_oledv103`
+→ ZIP with:
+- `firmwareFile.bin` 282,912 B (main MCU)
+- `firmwareOledFile.bin` 211,728 B (screen MCU)
+
+Related: `get_iot_version` with `{"sys_type":"win"}` returns `v218` /
+`iot_upgrade_file/win/iot_v218`; the app bundles IOT 222.
+
+### Firmware format
+
+- Raw ARM Thumb, **not encrypted** (entropy 4.47 / 3.45, 50% / 57% zero bytes).
+- Strings confirm the **YiChip YC3x SDK**: `yc_gpio.c`, `yc_uart.c`,
+  `yc_timer.c`, `yc_systick.c`, `yc_sysctrl.c`, `GPIO_Init`, `UART_Init`, etc.
+  The device name is `yc3121_kf850_uk_screen`, so the main MCU is a YC3121.
+- Main image contains `EPOMAKER DynaTab 75X` / `DynaTab 75X 5.0`.
+- Layout: 20 KB bootloader at `0x00000`, padding to `0x10000`, app at `0x10000`.
+  `upgrade_usb(file, 20480, 10)` skips the first 20,480 bytes and sends the rest.
+
+### Flashing protocol (from the app)
+
+1. Bootloader entry: 64-byte HID **feature report** on the main config interface
+   (iface 1): `7F 55 AA 55 AA 00 00 <chk>`, `<chk> = 0xFF - (sum[0:7] & 0xFF)`.
+   The device re-enumerates as bootloader **PID 0x4016** (usage page 0xFF01,
+   usage 1, interface 0).
+2. Start: `BA C0 <packets:2 LE> <bytes:3 LE> <chk>` (checksum at byte 7).
+   `packets = ceil((len(file) - 20480) / 64)`.
+3. Data: the app image (`file[20480:]`) in 64-byte feature reports, 10 ms apart,
+   no checksum (`ei.None`).
+4. Verify: `BA C2 <packets:2 LE> <sum32:4 LE>`; response byte 4 must be `0x55`.
+   `sum32` is a plain 32-bit sum of all data bytes (`Xo = reduce((a,b)=>a+b,0)`).
+5. The bootloader flashes, verifies, and reboots.
+
+The desktop app proxies HID through `iot_manager_rs.exe`, a gRPC-Web service on
+127.0.0.1:3814 (`/hid.HidService/Write`, `SendFeatureReport`,
+`ListenToReports`, `GetVersion`, ...). The JS talks to it with
+`@protobuf-ts/grpcweb-transport`.
+
+### Implications
+
+- The official firmware is publicly downloadable; no device dump is needed to
+  obtain it.
+- The image is unencrypted and can be disassembled/patched (Capstone, Ghidra).
+- Custom flashing is possible by reimplementing the bootloader protocol above,
+  but the checksum must be fixed and a bad image can brick the keyboard.
+- The 0.4 s input reset is in the main app; patching it out would remove the
+  live-update typing freeze, but that is a separate firmware-modification
+  project.
+
 ## Open questions
 
 - Which single commit is more robust for consecutive updates (`00 00` vs
@@ -152,6 +223,10 @@ Using one write halves the input dropout to roughly **0.38 s** per update.
 - A USB capture of the official Epomaker app showing text would reveal the
   native protocol and may avoid the iface-0 commit entirely.
 - Behaviour in 2.4 GHz wireless mode is untested.
+- Does the bootloader expose a read/verify command to dump the device flash and
+  compare it with the official image (per-device calibration data)?
+- Can the main firmware be patched to skip the iface-0 input reset, and will the
+  bootloader accept a modified image with a recomputed `sum32`?
 
 ## Next steps
 
@@ -161,3 +236,5 @@ Using one write halves the input dropout to roughly **0.38 s** per update.
 3. Add CLI `epomakercontroller screen-text "..."` (+ `--color`) and optionally
    `screen-watch` reading stdin lines.
 4. Probe iface-2-only refresh commands to eliminate the input dropout.
+5. Optionally implement a read-only bootloader probe (device ID/version) and a
+   Python flasher for custom firmware using the protocol above.
